@@ -23,6 +23,14 @@ def test_default_policy_denies_unknown_tools() -> None:
     assert "not included" in decision.reason
 
 
+def test_default_policy_asks_before_file_edits() -> None:
+    for tool_name in ("create_file", "replace_text"):
+        decision = default_permission_policy(PermissionRequest(tool_name, {}))
+
+        assert decision.action is PermissionAction.ASK
+        assert "modifies workspace files" in decision.reason
+
+
 def test_gate_returns_direct_allow_and_deny_decisions() -> None:
     request = PermissionRequest("test_tool", {"value": 1})
     allow = PermissionDecision(PermissionAction.ALLOW, "safe")

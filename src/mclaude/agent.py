@@ -21,8 +21,10 @@ from mclaude.provider import (
 from mclaude.tools import (
     TOOL_DEFINITIONS,
     ToolResult,
+    create_file,
     find_files,
     read_file,
+    replace_text,
     search_text,
 )
 
@@ -63,6 +65,10 @@ def _execute_tool(
             return find_files(block.input, workspace)
         if block.name == "search_text":
             return search_text(block.input, workspace)
+        if block.name == "create_file":
+            return create_file(block.input, workspace)
+        if block.name == "replace_text":
+            return replace_text(block.input, workspace)
         return ToolResult(f"Unknown tool: {block.name}", is_error=True)
     return read_file(block.input, workspace, max_chars=max_file_chars)
 

@@ -1,6 +1,9 @@
 """Tools exposed to the model by the minimal agent."""
 
+import difflib
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +12,8 @@ from pathspec import PathSpec
 DEFAULT_MAX_SEARCH_RESULTS = 200
 DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000
 DEFAULT_MAX_SEARCH_LINE_CHARS = 500
+DEFAULT_MAX_EDIT_FILE_BYTES = 1_000_000
+DEFAULT_MAX_DIFF_CHARS = 20_000
 
 READ_FILE_DEFINITION = {
     "name": "read_file",
@@ -73,10 +78,50 @@ SEARCH_TEXT_DEFINITION = {
     },
 }
 
+CREATE_FILE_DEFINITION = {
+    "name": "create_file",
+    "description": (
+        "Create a new UTF-8 text file in the workspace. "
+        "The call fails instead of overwriting an existing path."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path of the new file"},
+            "content": {"type": "string", "description": "Complete file content"},
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    },
+}
+
+REPLACE_TEXT_DEFINITION = {
+    "name": "replace_text",
+    "description": (
+        "Replace one exact, unique text occurrence in an existing UTF-8 workspace "
+        "file. The call fails if the expected text is missing or ambiguous."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path of the file to edit"},
+            "old_text": {
+                "type": "string",
+                "description": "Exact existing text, including whitespace",
+            },
+            "new_text": {"type": "string", "description": "Replacement text"},
+        },
+        "required": ["path", "old_text", "new_text"],
+        "additionalProperties": False,
+    },
+}
+
 TOOL_DEFINITIONS = [
     READ_FILE_DEFINITION,
     FIND_FILES_DEFINITION,
     SEARCH_TEXT_DEFINITION,
+    CREATE_FILE_DEFINITION,
+    REPLACE_TEXT_DEFINITION,
 ]
 
 
@@ -123,6 +168,57 @@ def _workspace_files(workspace: Path):
                 yield entry
 
     yield from walk(workspace)
+
+
+def _display_path(path: Path, workspace: Path) -> str:
+    return path.relative_to(workspace).as_posix()
+
+
+def _format_diff(
+    path: Path,
+    workspace: Path,
+    before: str,
+    after: str,
+    *,
+    created: bool = False,
+    max_chars: int = DEFAULT_MAX_DIFF_CHARS,
+) -> str:
+    relative = _display_path(path, workspace)
+    diff = "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile="/dev/null" if created else f"a/{relative}",
+            tofile=f"b/{relative}",
+            lineterm="",
+        )
+    )
+    if len(diff) > max_chars:
+        return f"{diff[:max_chars]}\n[Diff truncated after {max_chars} characters.]"
+    return diff
+
+
+def _atomic_replace(path: Path, original: bytes, updated: bytes) -> bool:
+    """Replace path atomically if its bytes still equal the version that was read."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(updated)
+            file.flush()
+            os.fsync(file.fileno())
+        if path.read_bytes() != original:
+            return False
+        os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
+        return True
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def read_file(tool_input: object, workspace: Path, *, max_chars: int) -> ToolResult:
@@ -264,3 +360,135 @@ def search_text(
     if truncated:
         matches.append(f"[Results truncated after {max_results} matches.]")
     return ToolResult("\n".join(matches))
+
+
+def create_file(
+    tool_input: object,
+    workspace: Path,
+    *,
+    max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+) -> ToolResult:
+    """Create a UTF-8 file without overwriting an existing path."""
+    if not isinstance(tool_input, dict):
+        return ToolResult("create_file input must be an object.", is_error=True)
+    path_value = tool_input.get("path")
+    content = tool_input.get("content")
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ToolResult(
+            "create_file requires a non-empty string path.", is_error=True
+        )
+    if not isinstance(content, str):
+        return ToolResult("create_file requires string content.", is_error=True)
+
+    workspace = workspace.resolve()
+    resolved = _resolve_in_workspace(path_value, workspace)
+    if resolved is None:
+        return ToolResult("Path is outside the workspace.", is_error=True)
+    if resolved.exists():
+        return ToolResult(
+            f"Path already exists; refusing to overwrite: {path_value}", is_error=True
+        )
+
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        if not resolved.parent.resolve().is_relative_to(workspace):
+            return ToolResult("Path is outside the workspace.", is_error=True)
+        with resolved.open("x", encoding="utf-8", newline="") as file:
+            file.write(content)
+    except FileExistsError:
+        return ToolResult(
+            f"Path already exists; refusing to overwrite: {path_value}", is_error=True
+        )
+    except (OSError, UnicodeError) as exc:
+        return ToolResult(
+            f"Could not create {path_value}: {type(exc).__name__}", is_error=True
+        )
+
+    diff = _format_diff(
+        resolved,
+        workspace,
+        "",
+        content,
+        created=True,
+        max_chars=max_diff_chars,
+    )
+    return ToolResult(f"Created {resolved.relative_to(workspace).as_posix()}\n\n{diff}")
+
+
+def replace_text(
+    tool_input: object,
+    workspace: Path,
+    *,
+    max_file_bytes: int = DEFAULT_MAX_EDIT_FILE_BYTES,
+    max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+) -> ToolResult:
+    """Replace one exact text occurrence and return a bounded unified diff."""
+    if not isinstance(tool_input, dict):
+        return ToolResult("replace_text input must be an object.", is_error=True)
+    path_value = tool_input.get("path")
+    old_text = tool_input.get("old_text")
+    new_text = tool_input.get("new_text")
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ToolResult(
+            "replace_text requires a non-empty string path.", is_error=True
+        )
+    if not isinstance(old_text, str) or not old_text:
+        return ToolResult("replace_text requires non-empty old_text.", is_error=True)
+    if not isinstance(new_text, str):
+        return ToolResult("replace_text requires string new_text.", is_error=True)
+    if old_text == new_text:
+        return ToolResult("old_text and new_text must differ.", is_error=True)
+
+    workspace = workspace.resolve()
+    resolved = _resolve_in_workspace(path_value, workspace)
+    if resolved is None:
+        return ToolResult("Path is outside the workspace.", is_error=True)
+    if not resolved.exists():
+        return ToolResult(f"File not found: {path_value}", is_error=True)
+    if not resolved.is_file():
+        return ToolResult(f"Path is not a file: {path_value}", is_error=True)
+
+    try:
+        original_bytes = resolved.read_bytes()
+        if len(original_bytes) > max_file_bytes:
+            return ToolResult(
+                f"File exceeds the edit limit of {max_file_bytes} bytes.",
+                is_error=True,
+            )
+        original = original_bytes.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        return ToolResult(
+            f"Could not read {path_value}: {type(exc).__name__}", is_error=True
+        )
+
+    occurrences = original.count(old_text)
+    if occurrences == 0:
+        return ToolResult(
+            "Expected text was not found; the file may have changed.", is_error=True
+        )
+    if occurrences > 1:
+        return ToolResult(
+            f"Expected text matched {occurrences} times; provide a unique match.",
+            is_error=True,
+        )
+
+    updated = original.replace(old_text, new_text, 1)
+    try:
+        replaced = _atomic_replace(resolved, original_bytes, updated.encode("utf-8"))
+    except OSError as exc:
+        return ToolResult(
+            f"Could not update {path_value}: {type(exc).__name__}", is_error=True
+        )
+    if not replaced:
+        return ToolResult(
+            "File changed during the edit; refusing to overwrite it.", is_error=True
+        )
+
+    diff = _format_diff(
+        resolved,
+        workspace,
+        original,
+        updated,
+        max_chars=max_diff_chars,
+    )
+    return ToolResult(f"Updated {resolved.relative_to(workspace).as_posix()}\n\n{diff}")

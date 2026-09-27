@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mclaude.tools import find_files, read_file, search_text
+from mclaude.tools import create_file, find_files, read_file, replace_text, search_text
 
 
 def test_read_file_reads_utf8_text(tmp_path: Path) -> None:
@@ -146,3 +146,87 @@ def test_search_text_skips_oversized_files_and_truncates_lines(tmp_path: Path) -
     )
 
     assert result.content == "line.txt:1:needle…"
+
+
+def test_create_file_creates_parents_and_returns_diff(tmp_path: Path) -> None:
+    result = create_file({"path": "new/example.py", "content": "one\ntwo\n"}, tmp_path)
+
+    assert (tmp_path / "new" / "example.py").read_text(encoding="utf-8") == (
+        "one\ntwo\n"
+    )
+    assert result.is_error is False
+    assert "Created new/example.py" in result.content
+    assert "--- /dev/null" in result.content
+    assert "+++ b/new/example.py" in result.content
+    assert "+one" in result.content
+
+
+def test_create_file_refuses_overwrite_and_outside_paths(tmp_path: Path) -> None:
+    existing = tmp_path / "existing.txt"
+    existing.write_text("keep", encoding="utf-8")
+
+    overwrite = create_file({"path": "existing.txt", "content": "replace"}, tmp_path)
+    outside = create_file({"path": "../outside.txt", "content": "no"}, tmp_path)
+
+    assert overwrite.is_error is True
+    assert "refusing to overwrite" in overwrite.content
+    assert existing.read_text(encoding="utf-8") == "keep"
+    assert outside.is_error is True
+    assert not (tmp_path.parent / "outside.txt").exists()
+
+
+def test_replace_text_updates_unique_match_and_returns_diff(tmp_path: Path) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("before\nvalue = 1\nafter\n", encoding="utf-8", newline="")
+
+    result = replace_text(
+        {"path": "module.py", "old_text": "value = 1", "new_text": "value = 2"},
+        tmp_path,
+    )
+
+    assert target.read_text(encoding="utf-8") == "before\nvalue = 2\nafter\n"
+    assert result.is_error is False
+    assert "Updated module.py" in result.content
+    assert "--- a/module.py" in result.content
+    assert "-value = 1" in result.content
+    assert "+value = 2" in result.content
+
+
+def test_replace_text_rejects_stale_or_ambiguous_match(tmp_path: Path) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("same\nsame\n", encoding="utf-8")
+
+    stale = replace_text(
+        {"path": "module.py", "old_text": "old value", "new_text": "new value"},
+        tmp_path,
+    )
+    ambiguous = replace_text(
+        {"path": "module.py", "old_text": "same", "new_text": "changed"},
+        tmp_path,
+    )
+
+    assert stale.is_error is True
+    assert "may have changed" in stale.content
+    assert ambiguous.is_error is True
+    assert "matched 2 times" in ambiguous.content
+    assert target.read_text(encoding="utf-8") == "same\nsame\n"
+
+
+def test_file_edit_tools_validate_inputs_and_limits(tmp_path: Path) -> None:
+    target = tmp_path / "large.txt"
+    target.write_text("abcdef", encoding="utf-8")
+
+    results = [
+        create_file([], tmp_path),
+        create_file({"path": "x"}, tmp_path),
+        replace_text({}, tmp_path),
+        replace_text(
+            {"path": "large.txt", "old_text": "a", "new_text": "b"},
+            tmp_path,
+            max_file_bytes=3,
+        ),
+    ]
+
+    assert all(result.is_error for result in results)
+    assert "edit limit" in results[-1].content
+    assert target.read_text(encoding="utf-8") == "abcdef"

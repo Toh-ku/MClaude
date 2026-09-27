@@ -52,6 +52,8 @@ def test_agent_reads_file_and_returns_final_answer(
         "read_file",
         "find_files",
         "search_text",
+        "create_file",
+        "replace_text",
     ]
     assert calls[1][0][1] == {
         "role": "assistant",
@@ -188,6 +190,44 @@ def test_agent_does_not_execute_denied_tool_and_returns_reason(
         "content": ("Permission denied for tool 'read_file': This path is restricted."),
         "is_error": True,
     }
+
+
+def test_agent_asks_before_creating_file(tmp_path: Path, config: ModelConfig) -> None:
+    responses = iter(
+        [
+            ModelResponse(
+                content=(
+                    ToolUseBlock(
+                        "create",
+                        "create_file",
+                        {"path": "created.txt", "content": "new content\n"},
+                    ),
+                ),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(content=(TextBlock("Created it."),), stop_reason="end_turn"),
+        ]
+    )
+    prompts = []
+
+    def request(messages, request_config, *, tools):
+        return next(responses)
+
+    def approve(permission_request, reason):
+        prompts.append((permission_request.tool_name, reason))
+        return True
+
+    result = run_agent(
+        "Create a file",
+        config,
+        workspace=tmp_path,
+        request=request,
+        permission_gate=PermissionGate(prompt=approve),
+    )
+
+    assert result.text == "Created it."
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "new content\n"
+    assert prompts == [("create_file", "This tool modifies workspace files.")]
 
 
 def test_agent_preserves_partial_text_when_output_is_truncated(
