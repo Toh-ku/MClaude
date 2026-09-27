@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from mclaude.processes import pid_is_running
+from mclaude.tasks import TaskBoard, validate_tasks
+
 SESSION_VERSION = 1
 MAX_EVENT_BYTES = 2_000_000
 _SESSION_ID = re.compile(r"[0-9a-f]{32}")
@@ -60,15 +63,7 @@ def _validate_session_id(session_id: str) -> str:
 
 
 def _pid_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return pid_is_running(pid)
 
 
 def _acquire_lock(path: Path) -> str:
@@ -195,6 +190,7 @@ class Session:
     _lock_token: str
     _sequence: int
     recovery_warning: str | None = None
+    task_board: TaskBoard = field(default_factory=TaskBoard)
     _closed: bool = field(default=False, init=False)
 
     def record_message(self, message: dict[str, Any]) -> None:
@@ -209,6 +205,11 @@ class Session:
         if status not in {"ok", "error", "cancelled", "truncated"}:
             raise ValueError(f"Unsupported turn status: {status}")
         self._append({"type": "turn.finished", "status": status})
+
+    def record_tasks(self, tasks: list[dict[str, str]]) -> None:
+        updated = validate_tasks(tasks)
+        self._append({"type": "tasks.updated", "tasks": updated})
+        self.task_board.tasks = updated
 
     def record_compaction(self, history: list[dict[str, Any]]) -> None:
         validated = _validate_complete_history(history)
@@ -359,7 +360,7 @@ class SessionStore:
                     "That session belongs to a different workspace and cannot be "
                     "resumed here."
                 )
-            history, pending, sequence = self._project(records[1:])
+            history, pending, sequence, task_board = self._project(records[1:])
             session = Session(
                 id=session_id,
                 workspace=workspace,
@@ -368,6 +369,7 @@ class SessionStore:
                 _lock_path=lock_path,
                 _lock_token=lock_token,
                 _sequence=sequence,
+                task_board=task_board,
             )
             warnings = []
             if tail_repaired:
@@ -448,8 +450,9 @@ class SessionStore:
 
     def _project(
         self, records: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[str], int]:
+    ) -> tuple[list[dict[str, Any]], list[str], int, TaskBoard]:
         history: list[dict[str, Any]] = []
+        task_board = TaskBoard()
         pending: list[str] = []
         result_message: dict[str, Any] | None = None
         sequence = 0
@@ -494,6 +497,11 @@ class SessionStore:
                     "truncated",
                 }:
                     raise SessionError("Session contains an invalid turn status.")
+            elif event_type == "tasks.updated":
+                try:
+                    task_board.tasks = validate_tasks(record.get("tasks"))
+                except ValueError as exc:
+                    raise SessionError(str(exc)) from exc
             elif event_type == "context.compacted":
                 if pending:
                     raise SessionError(
@@ -503,4 +511,4 @@ class SessionStore:
                 result_message = None
             else:
                 raise SessionError(f"Unsupported session event: {event_type!r}.")
-        return history, pending, sequence
+        return history, pending, sequence, task_board

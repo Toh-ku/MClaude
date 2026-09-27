@@ -104,6 +104,11 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 ## 开发检查
 
+## 任务进度
+
+模型可通过 `update_tasks` 维护步骤（唯一 ID、说明、pending/in_progress/completed/blocked 状态），通过 `list_tasks` 查看。交互输入 `/tasks` 可直接查看，无需请求模型。最多 100 步；任务状态独立于对话摘要存入会话日志，恢复后仍保留。单次运行或 `--no-persist` 的任务仅保存在内存。
+
+
 ```powershell
 uv run ruff format --check .
 uv run ruff check .

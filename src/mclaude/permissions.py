@@ -33,7 +33,7 @@ PermissionPolicy = Callable[[PermissionRequest], PermissionDecision]
 PermissionPrompt = Callable[[PermissionRequest, str], bool]
 
 READ_ONLY_TOOLS = frozenset(
-    {"read_file", "find_files", "search_text", "list_edit_checkpoints"}
+    {"read_file", "find_files", "search_text", "list_edit_checkpoints", "list_tasks"}
 )
 FILE_EDIT_TOOLS = frozenset({"create_file", "replace_text", "restore_edit_checkpoint"})
 COMMAND_TOOLS = frozenset({"run_command"})
@@ -41,7 +41,7 @@ COMMAND_TOOLS = frozenset({"run_command"})
 
 def default_permission_policy(request: PermissionRequest) -> PermissionDecision:
     """Allow known read-only tools and reject everything else."""
-    if request.tool_name in READ_ONLY_TOOLS:
+    if request.tool_name in READ_ONLY_TOOLS or request.tool_name == "update_tasks":
         return PermissionDecision(
             PermissionAction.ALLOW, "Known read-only workspace tool."
         )

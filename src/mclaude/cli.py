@@ -19,6 +19,7 @@ from mclaude.context import (
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
+from mclaude.tasks import TaskBoard
 
 
 def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
@@ -45,6 +46,7 @@ def _run_conversation(
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
+    task_board = session.task_board if session is not None else TaskBoard()
     workspace = Path.cwd()
     permission_gate = PermissionGate(prompt=_prompt_tool_permission)
     exit_code = 0
@@ -64,6 +66,8 @@ def _run_conversation(
             session.record_tool_result(payload)
         elif event_type == "compaction":
             session.record_compaction(payload["history"])
+        elif event_type == "tasks":
+            session.record_tasks(payload["tasks"])
         else:
             raise SessionError(f"Unsupported history event: {event_type}")
 
@@ -78,6 +82,10 @@ def _run_conversation(
             if prompt.strip().casefold() in {"/exit", "/quit"}:
                 return exit_code
             if not prompt.strip():
+                prompt = None
+                continue
+            if prompt.strip().casefold() == "/tasks":
+                print(task_board.render())
                 prompt = None
                 continue
         streamed = False
@@ -96,6 +104,7 @@ def _run_conversation(
                 context_budget_tokens=context_budget_tokens,
                 permission_gate=permission_gate,
                 history=history,
+                task_board=task_board,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )

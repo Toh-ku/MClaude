@@ -29,6 +29,7 @@ from mclaude.provider import (
     ToolUseBlock,
     create_message,
 )
+from mclaude.tasks import TASK_DEFINITIONS, TaskBoard
 from mclaude.tools import (
     TOOL_DEFINITIONS,
     ToolResult,
@@ -113,6 +114,7 @@ def run_agent(
     project_instructions: ProjectInstructions | None = None,
     context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     checkpoint_store: CheckpointStore | None = None,
+    task_board: TaskBoard | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -130,6 +132,9 @@ def run_agent(
     checkpoint_store = checkpoint_store or CheckpointStore(workspace)
     project_instructions = project_instructions or load_project_instructions(workspace)
     system_prompt = project_instructions.system_prompt()
+    base_system_prompt = system_prompt or ""
+    task_board = task_board if task_board is not None else TaskBoard()
+    tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS]
     try:
         context_budget = ContextBudget(context_budget_tokens, config.max_tokens)
     except ValueError as exc:
@@ -143,6 +148,9 @@ def run_agent(
         on_history_event("message", user_message)
 
     for _ in range(max_iterations):
+        system_prompt = base_system_prompt
+        if task_board.tasks:
+            system_prompt += "\nCurrent task state:\n" + task_board.render()
         chunks: list[str] = []
 
         def emit_text(chunk: str, buffer: list[str] = chunks) -> None:
@@ -153,13 +161,13 @@ def run_agent(
         try:
             try:
                 context_budget.ensure_fits(
-                    messages, tools=TOOL_DEFINITIONS, system=system_prompt
+                    messages, tools=tool_definitions, system=system_prompt
                 )
             except ContextBudgetExceeded as exc:
                 compacted = compact_history(
                     messages,
                     context_budget,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tool_definitions,
                     system=system_prompt,
                 )
                 if compacted is None:
@@ -170,7 +178,7 @@ def run_agent(
             response = request(
                 messages,
                 config,
-                tools=TOOL_DEFINITIONS,
+                tools=tool_definitions,
                 **({"system": system_prompt} if system_prompt else {}),
                 **({"on_text": emit_text} if on_text is not None else {}),
             )
@@ -256,12 +264,17 @@ def run_agent(
                 )
                 if permission.action is PermissionAction.ALLOW:
                     executing = True
-                    result = _execute_tool(
-                        call,
-                        workspace,
-                        max_file_chars=max_file_chars,
-                        checkpoints=checkpoint_store,
-                    )
+                    if call.name in {"list_tasks", "update_tasks"}:
+                        result = task_board.execute(
+                            call.name, call.input, on_history_event
+                        )
+                    else:
+                        result = _execute_tool(
+                            call,
+                            workspace,
+                            max_file_chars=max_file_chars,
+                            checkpoints=checkpoint_store,
+                        )
                 else:
                     result = ToolResult(
                         f"Permission denied for tool '{call.name}': "
@@ -294,7 +307,7 @@ def run_agent(
                 fitted_content, budget_truncated = context_budget.fit_tool_result(
                     original_content,
                     build_messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tool_definitions,
                     system=system_prompt,
                 )
                 result_block = {
