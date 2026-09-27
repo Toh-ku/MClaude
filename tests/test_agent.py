@@ -58,6 +58,8 @@ def test_agent_reads_file_and_returns_final_answer(
         "create_file",
         "replace_text",
         "run_command",
+        "list_edit_checkpoints",
+        "restore_edit_checkpoint",
     ]
     assert calls[1][0][1] == {
         "role": "assistant",

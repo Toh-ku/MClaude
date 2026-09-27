@@ -32,8 +32,10 @@ class PermissionDecision:
 PermissionPolicy = Callable[[PermissionRequest], PermissionDecision]
 PermissionPrompt = Callable[[PermissionRequest, str], bool]
 
-READ_ONLY_TOOLS = frozenset({"read_file", "find_files", "search_text"})
-FILE_EDIT_TOOLS = frozenset({"create_file", "replace_text"})
+READ_ONLY_TOOLS = frozenset(
+    {"read_file", "find_files", "search_text", "list_edit_checkpoints"}
+)
+FILE_EDIT_TOOLS = frozenset({"create_file", "replace_text", "restore_edit_checkpoint"})
 COMMAND_TOOLS = frozenset({"run_command"})
 
 

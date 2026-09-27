@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mclaude.cancellation import TurnCancelled, protect_cleanup
+from mclaude.checkpoints import CheckpointStore
 from mclaude.config import ModelConfig
 from mclaude.context import (
     DEFAULT_CONTEXT_BUDGET_TOKENS,
@@ -33,8 +34,10 @@ from mclaude.tools import (
     ToolResult,
     create_file,
     find_files,
+    list_edit_checkpoints,
     read_file,
     replace_text,
+    restore_edit_checkpoint,
     run_command,
     search_text,
 )
@@ -70,7 +73,11 @@ def _assistant_content(response: ModelResponse) -> list[dict[str, Any]]:
 
 
 def _execute_tool(
-    block: ToolUseBlock, workspace: Path, *, max_file_chars: int
+    block: ToolUseBlock,
+    workspace: Path,
+    *,
+    max_file_chars: int,
+    checkpoints: CheckpointStore,
 ) -> ToolResult:
     if block.name != "read_file":
         if block.name == "find_files":
@@ -78,11 +85,15 @@ def _execute_tool(
         if block.name == "search_text":
             return search_text(block.input, workspace)
         if block.name == "create_file":
-            return create_file(block.input, workspace)
+            return create_file(block.input, workspace, checkpoints=checkpoints)
         if block.name == "replace_text":
-            return replace_text(block.input, workspace)
+            return replace_text(block.input, workspace, checkpoints=checkpoints)
         if block.name == "run_command":
             return run_command(block.input, workspace)
+        if block.name == "list_edit_checkpoints":
+            return list_edit_checkpoints(block.input, checkpoints)
+        if block.name == "restore_edit_checkpoint":
+            return restore_edit_checkpoint(block.input, checkpoints)
         return ToolResult(f"Unknown tool: {block.name}", is_error=True)
     return read_file(block.input, workspace, max_chars=max_file_chars)
 
@@ -101,6 +112,7 @@ def run_agent(
     on_history_event: HistoryEvent | None = None,
     project_instructions: ProjectInstructions | None = None,
     context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+    checkpoint_store: CheckpointStore | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -115,6 +127,7 @@ def run_agent(
         raise ValueError("max_file_chars must be positive.")
 
     workspace = (workspace or Path.cwd()).resolve()
+    checkpoint_store = checkpoint_store or CheckpointStore(workspace)
     project_instructions = project_instructions or load_project_instructions(workspace)
     system_prompt = project_instructions.system_prompt()
     try:
@@ -244,7 +257,10 @@ def run_agent(
                 if permission.action is PermissionAction.ALLOW:
                     executing = True
                     result = _execute_tool(
-                        call, workspace, max_file_chars=max_file_chars
+                        call,
+                        workspace,
+                        max_file_chars=max_file_chars,
+                        checkpoints=checkpoint_store,
                     )
                 else:
                     result = ToolResult(

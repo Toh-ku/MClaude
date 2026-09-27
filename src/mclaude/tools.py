@@ -14,6 +14,7 @@ from pathlib import Path
 from pathspec import PathSpec
 
 from mclaude.cancellation import TurnCancelled, protect_cleanup
+from mclaude.checkpoints import CheckpointError, CheckpointStore
 
 DEFAULT_MAX_SEARCH_RESULTS = 200
 DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000
@@ -155,6 +156,34 @@ RUN_COMMAND_DEFINITION = {
     },
 }
 
+LIST_CHECKPOINTS_DEFINITION = {
+    "name": "list_edit_checkpoints",
+    "description": "List recent file edit checkpoints for this workspace.",
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
+RESTORE_CHECKPOINT_DEFINITION = {
+    "name": "restore_edit_checkpoint",
+    "description": (
+        "Undo one Agent file edit if the file has not changed since that edit."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "checkpoint_id": {
+                "type": "string",
+                "description": "Checkpoint ID returned by an edit or listing",
+            }
+        },
+        "required": ["checkpoint_id"],
+        "additionalProperties": False,
+    },
+}
+
 TOOL_DEFINITIONS = [
     READ_FILE_DEFINITION,
     FIND_FILES_DEFINITION,
@@ -162,6 +191,8 @@ TOOL_DEFINITIONS = [
     CREATE_FILE_DEFINITION,
     REPLACE_TEXT_DEFINITION,
     RUN_COMMAND_DEFINITION,
+    LIST_CHECKPOINTS_DEFINITION,
+    RESTORE_CHECKPOINT_DEFINITION,
 ]
 
 
@@ -451,6 +482,7 @@ def create_file(
     workspace: Path,
     *,
     max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+    checkpoints: CheckpointStore | None = None,
 ) -> ToolResult:
     """Create a UTF-8 file without overwriting an existing path."""
     if not isinstance(tool_input, dict):
@@ -473,17 +505,27 @@ def create_file(
             f"Path already exists; refusing to overwrite: {path_value}", is_error=True
         )
 
+    checkpoint_id = None
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if not resolved.parent.resolve().is_relative_to(workspace):
             return ToolResult("Path is outside the workspace.", is_error=True)
         with resolved.open("x", encoding="utf-8", newline="") as file:
             file.write(content)
+        if checkpoints is not None:
+            try:
+                checkpoint_id = checkpoints.save(
+                    resolved, None, content.encode("utf-8")
+                )
+            except CheckpointError:
+                if resolved.read_bytes() == content.encode("utf-8"):
+                    resolved.unlink()
+                raise
     except FileExistsError:
         return ToolResult(
             f"Path already exists; refusing to overwrite: {path_value}", is_error=True
         )
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, CheckpointError) as exc:
         return ToolResult(
             f"Could not create {path_value}: {type(exc).__name__}", is_error=True
         )
@@ -496,7 +538,10 @@ def create_file(
         created=True,
         max_chars=max_diff_chars,
     )
-    return ToolResult(f"Created {resolved.relative_to(workspace).as_posix()}\n\n{diff}")
+    checkpoint = f"\nCheckpoint: {checkpoint_id}" if checkpoint_id else ""
+    return ToolResult(
+        f"Created {resolved.relative_to(workspace).as_posix()}{checkpoint}\n\n{diff}"
+    )
 
 
 def replace_text(
@@ -505,6 +550,7 @@ def replace_text(
     *,
     max_file_bytes: int = DEFAULT_MAX_EDIT_FILE_BYTES,
     max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+    checkpoints: CheckpointStore | None = None,
 ) -> ToolResult:
     """Replace one exact text occurrence and return a bounded unified diff."""
     if not isinstance(tool_input, dict):
@@ -557,13 +603,22 @@ def replace_text(
         )
 
     updated = original.replace(old_text, new_text, 1)
+    checkpoint_id = None
     try:
+        if checkpoints is not None:
+            checkpoint_id = checkpoints.save(
+                resolved, original_bytes, updated.encode("utf-8")
+            )
         replaced = _atomic_replace(resolved, original_bytes, updated.encode("utf-8"))
-    except OSError as exc:
+    except (OSError, CheckpointError) as exc:
+        if checkpoint_id is not None and checkpoints is not None:
+            checkpoints.discard(checkpoint_id)
         return ToolResult(
             f"Could not update {path_value}: {type(exc).__name__}", is_error=True
         )
     if not replaced:
+        if checkpoint_id is not None and checkpoints is not None:
+            checkpoints.discard(checkpoint_id)
         return ToolResult(
             "File changed during the edit; refusing to overwrite it.", is_error=True
         )
@@ -575,7 +630,50 @@ def replace_text(
         updated,
         max_chars=max_diff_chars,
     )
-    return ToolResult(f"Updated {resolved.relative_to(workspace).as_posix()}\n\n{diff}")
+    checkpoint = f"\nCheckpoint: {checkpoint_id}" if checkpoint_id else ""
+    return ToolResult(
+        f"Updated {resolved.relative_to(workspace).as_posix()}{checkpoint}\n\n{diff}"
+    )
+
+
+def list_edit_checkpoints(
+    tool_input: object, checkpoints: CheckpointStore
+) -> ToolResult:
+    if not isinstance(tool_input, dict) or tool_input:
+        return ToolResult(
+            "list_edit_checkpoints input must be an empty object.", is_error=True
+        )
+    try:
+        items = checkpoints.list()[:50]
+    except CheckpointError as exc:
+        return ToolResult(str(exc), is_error=True)
+    if not items:
+        return ToolResult("No edit checkpoints exist for this workspace.")
+    return ToolResult(
+        "\n".join(
+            f"{item.id}  {item.path}  "
+            f"{'restored' if item.restored else 'available'}  {item.created_at}"
+            for item in items
+        )
+    )
+
+
+def restore_edit_checkpoint(
+    tool_input: object, checkpoints: CheckpointStore
+) -> ToolResult:
+    if not isinstance(tool_input, dict):
+        return ToolResult(
+            "restore_edit_checkpoint input must be an object.", is_error=True
+        )
+    checkpoint_id = tool_input.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+        return ToolResult(
+            "restore_edit_checkpoint requires a checkpoint_id.", is_error=True
+        )
+    try:
+        return ToolResult(checkpoints.restore(checkpoint_id))
+    except CheckpointError as exc:
+        return ToolResult(str(exc), is_error=True)
 
 
 def run_command(
