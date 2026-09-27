@@ -53,7 +53,10 @@ def default_permission_policy(request: PermissionRequest) -> PermissionDecision:
         return PermissionDecision(
             PermissionAction.ASK, "External MCP tool; side effects are not trusted."
         )
-    if request.tool_name in READ_ONLY_TOOLS or request.tool_name == "update_tasks":
+    if request.tool_name in READ_ONLY_TOOLS or request.tool_name in {
+        "update_tasks",
+        "delegate_readonly",
+    }:
         return PermissionDecision(
             PermissionAction.ALLOW, "Known read-only workspace tool."
         )

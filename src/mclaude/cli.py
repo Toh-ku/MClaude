@@ -49,6 +49,7 @@ def _run_conversation(
     planning: bool = False,
     hooks: HookRunner | None = None,
     mcp: MCPRegistry | None = None,
+    subagent_budget: int = 8,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
@@ -123,6 +124,7 @@ def _run_conversation(
                 planning=planning,
                 hooks=hooks,
                 mcp=mcp,
+                subagent_budget=subagent_budget,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )
@@ -165,6 +167,12 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "--subagent-budget",
+        type=int,
+        default=8,
+        help="Total delegated model requests per turn (0-32; default: 8)",
+    )
     parser.add_argument(
         "--mcp-config", type=Path, help="Enable stdio MCP servers from JSON"
     )
@@ -281,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("The prompt must not be empty.")
     if args.max_iterations <= 0:
         parser.error("--max-iterations must be a positive integer.")
+    if not 0 <= args.subagent_budget <= 32:
+        parser.error("--subagent-budget must be between 0 and 32.")
     if args.context_budget <= args.max_tokens:
         parser.error("--context-budget must be greater than --max-tokens.")
     load_dotenv(Path.cwd() / ".env", override=False)
@@ -333,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
                 planning=args.plan,
                 hooks=hooks,
                 mcp=mcp,
+                subagent_budget=args.subagent_budget,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)

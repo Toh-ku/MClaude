@@ -34,6 +34,7 @@ from mclaude.provider import (
     create_message,
 )
 from mclaude.skills import LOAD_SKILL_DEFINITION, SkillCatalog
+from mclaude.subagents import DELEGATE_DEFINITION, SubagentRunner
 from mclaude.tasks import TASK_DEFINITIONS, TaskBoard
 from mclaude.tools import (
     TOOL_DEFINITIONS,
@@ -123,6 +124,9 @@ def run_agent(
     planning: bool = False,
     hooks: HookRunner | None = None,
     mcp: MCPRegistry | None = None,
+    allowed_tools: frozenset[str] | None = None,
+    subagent_budget: int = 8,
+    subagent_depth: int = 0,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -135,6 +139,8 @@ def run_agent(
         raise ValueError("max_iterations must be positive.")
     if max_file_chars <= 0:
         raise ValueError("max_file_chars must be positive.")
+    if type(subagent_budget) is not int or not 0 <= subagent_budget <= 32:
+        raise ValueError("subagent_budget must be between 0 and 32.")
 
     workspace = (workspace or Path.cwd()).resolve()
     checkpoint_store = checkpoint_store or CheckpointStore(workspace)
@@ -142,6 +148,7 @@ def run_agent(
     system_prompt = project_instructions.system_prompt()
     base_system_prompt = system_prompt or ""
     task_board = task_board if task_board is not None else TaskBoard()
+    subagents = SubagentRunner(subagent_budget, subagent_depth)
     skills = SkillCatalog(workspace)
     tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS, LOAD_SKILL_DEFINITION]
     if mcp is not None and not planning:
@@ -154,6 +161,10 @@ def run_agent(
         base_system_prompt += (
             "\nAvailable skills (load on demand):\n" + skills.summary()
         )
+    if not planning and subagent_depth == 0 and subagent_budget > 0:
+        tool_definitions.append(DELEGATE_DEFINITION)
+    if allowed_tools is not None:
+        tool_definitions = [t for t in tool_definitions if t["name"] in allowed_tools]
     if planning:
         tool_definitions = [
             tool for tool in tool_definitions if tool["name"] in READ_ONLY_TOOLS
@@ -286,7 +297,12 @@ def run_agent(
             for call in tool_calls:
                 active_call = call.id
                 executing = False
-                if planning and call.name not in READ_ONLY_TOOLS:
+                if allowed_tools is not None and call.name not in allowed_tools:
+                    permission = PermissionDecision(
+                        PermissionAction.DENY,
+                        "Tool is outside this agent's allowed set.",
+                    )
+                elif planning and call.name not in READ_ONLY_TOOLS:
                     permission = PermissionDecision(
                         PermissionAction.DENY, "Tool is blocked in planning mode."
                     )
@@ -310,6 +326,16 @@ def run_agent(
                             return skills.load(call.input)
                         if mcp is not None and call.name in mcp.routes:
                             return mcp.execute(call.name, call.input)
+                        if call.name == "delegate_readonly":
+                            return subagents.execute(
+                                call.input,
+                                config=config,
+                                workspace=workspace,
+                                request=request,
+                                permission_gate=permission_gate,
+                                context_budget_tokens=context_budget_tokens,
+                                max_file_chars=max_file_chars,
+                            )
                         return _execute_tool(
                             call,
                             workspace,

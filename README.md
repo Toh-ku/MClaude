@@ -138,6 +138,14 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 ## 开发检查
 
+## 只读子 Agent
+
+`delegate_readonly` 接收独立调查提示和可选 `max_iterations`（1–4），创建全新历史，仅允许 `read_file`、`find_files`、`search_text`。父对话、任务状态、Hooks 和 MCP 连接不传入子 Agent；子 Agent 仍加载工作区项目规则。父 Agent 只收到最多 16,000 字符的最终报告。禁止递归委派，写入和命令即使被模型请求也会在运行时拒绝。
+
+`--subagent-budget` 控制每轮所有委派合计的模型请求预算，默认 8、范围 0–32；设为 0 禁用委派。单个子 Agent 最多 4 次请求，失败与预算耗尽作为工具错误返回父 Agent。预算按逻辑模型请求计数，已有 API 重试策略仍适用。Ctrl+C 取消会向父轮次传播，不遗留后台子 Agent。
+
+## 开发检查
+
 ```powershell
 uv run ruff format --check .
 uv run ruff check .
