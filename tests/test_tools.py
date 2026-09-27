@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from mclaude.tools import (
     create_file,
     find_files,
@@ -317,3 +319,57 @@ def test_run_command_validates_scope_timeout_and_output_limit(tmp_path: Path) ->
     assert "at most 600" in results[5].content
     assert bounded.is_error is False
     assert bounded.content.endswith("[Output truncated after 30 characters.]")
+
+
+def test_cancel_command_terminates_shell_and_descendant(tmp_path, monkeypatch):
+    import signal
+    import threading
+    import time
+
+    from mclaude.cancellation import TurnCancelled
+
+    child = tmp_path / "child.py"
+    child.write_text(
+        "from pathlib import Path\nimport time\n"
+        "Path('ready').write_text('ready')\n"
+        "time.sleep(2)\nPath('survived').write_text('should not run')\n",
+        encoding="utf-8",
+    )
+    command = _python_command(
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, 'child.py']); "
+        "print('started', flush=True); time.sleep(60)"
+    )
+    original_popen = subprocess.Popen
+    processes = []
+
+    def popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        if args[0] != command:
+            return process
+        processes.append(process)
+        return process
+
+    def interrupt_when_ready():
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if (tmp_path / "ready").exists():
+            signal.raise_signal(signal.SIGINT)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    original_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    interrupter = threading.Thread(target=interrupt_when_ready)
+    interrupter.start()
+    try:
+        with pytest.raises(TurnCancelled) as error:
+            run_command({"command": command, "timeout_seconds": 6}, tmp_path)
+    finally:
+        interrupter.join()
+        signal.signal(signal.SIGINT, original_handler)
+    assert processes[0].poll() is not None
+    assert "started" in str(error.value)
+    assert "process tree terminated" in str(error.value)
+    assert processes[0].stdout.closed and processes[0].stderr.closed
+    time.sleep(2.2)
+    assert not (tmp_path / "survived").exists()

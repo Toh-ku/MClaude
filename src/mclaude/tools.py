@@ -7,10 +7,13 @@ import re
 import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from pathspec import PathSpec
+
+from mclaude.cancellation import TurnCancelled, protect_cleanup
 
 DEFAULT_MAX_SEARCH_RESULTS = 200
 DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000
@@ -259,21 +262,25 @@ def _atomic_replace(path: Path, original: bytes, updated: bytes) -> bool:
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    """Best-effort termination for a timed-out shell and its child processes."""
-    if process.poll() is not None:
-        return
+    """Terminate a timed-out or cancelled shell and its child processes."""
     try:
         if os.name == "nt":
-            subprocess.run(
+            if process.poll() is not None:
+                return
+            result = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                timeout=10,
             )
+            if result.returncode and process.poll() is None:
+                process.kill()
         else:
             os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
-        process.kill()
+    except (OSError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            process.kill()
 
 
 def _format_command_output(
@@ -621,6 +628,7 @@ def run_command(
             command,
             cwd=working_directory,
             shell=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -633,18 +641,42 @@ def run_command(
             f"Could not start command: {type(exc).__name__}", is_error=True
         )
 
+    deadline = time.monotonic() + float(timeout)
     try:
-        stdout, stderr = process.communicate(timeout=float(timeout))
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
-        stdout, stderr = process.communicate()
-        content = _format_command_output(
-            f"Command timed out after {timeout:g} seconds.",
-            stdout,
-            stderr,
-            max_chars=max_output_chars,
-        )
-        return ToolResult(content, is_error=True)
+        try:
+            while True:
+                # Short waits allow Python to handle Ctrl+C on Windows even
+                # while communicate() waits for its pipe-reader threads.
+                remaining = max(0, deadline - time.monotonic())
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= deadline:
+                        raise
+        except subprocess.TimeoutExpired:
+            with protect_cleanup():
+                _terminate_process_tree(process)
+                stdout, stderr = process.communicate()
+            content = _format_command_output(
+                f"Command timed out after {timeout:g} seconds.",
+                stdout,
+                stderr,
+                max_chars=max_output_chars,
+            )
+            return ToolResult(content, is_error=True)
+    except KeyboardInterrupt:
+        with protect_cleanup():
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            content = _format_command_output(
+                "Command cancelled by the user; process tree terminated. "
+                "Changes already made were not undone.",
+                stdout,
+                stderr,
+                max_chars=max_output_chars,
+            )
+        raise TurnCancelled(content) from None
 
     content = _format_command_output(
         f"Exit code: {process.returncode}",

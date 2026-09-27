@@ -1,10 +1,12 @@
 """Exercise the real SDK against a simulated HTTP transport."""
 
+import asyncio
 import json
+import signal
 
 import httpx2
 import pytest
-from anthropic import Anthropic
+from anthropic import Anthropic, AsyncAnthropic
 
 from mclaude import cli, provider
 from mclaude.config import ModelConfig
@@ -81,8 +83,8 @@ def api(monkeypatch: pytest.MonkeyPatch):
             raise state["error"]("simulated failure", request=request)
         if json.loads(request.content).get("stream") and state["status"] == 200:
 
-            class Stream(httpx2.SyncByteStream):
-                def __iter__(self):
+            class Stream(httpx2.AsyncByteStream):
+                async def __aiter__(self):
                     events = state["events"]
                     if events is None:
                         events = message_events(state["body"])
@@ -94,7 +96,7 @@ def api(monkeypatch: pytest.MonkeyPatch):
                             f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
                         ).encode()
 
-                def close(self):
+                async def aclose(self):
                     state["stream_closed"] = True
 
             return httpx2.Response(
@@ -111,6 +113,17 @@ def api(monkeypatch: pytest.MonkeyPatch):
         return client
 
     monkeypatch.setattr(provider, "Anthropic", factory)
+
+    def async_factory(**kwargs):
+        state["options"] = kwargs
+        client = AsyncAnthropic(
+            **kwargs,
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+        )
+        state["client"] = client
+        return client
+
+    monkeypatch.setattr(provider, "AsyncAnthropic", async_factory)
     return state
 
 
@@ -397,3 +410,84 @@ def test_failed_stream_preserves_text_without_executing_tools(
         "content": [{"type": "text", "text": "Partial answer"}],
     }
     assert api["stream_closed"] and api["client"].is_closed()
+
+
+def test_cancelled_sdk_stream_closes_connection_and_preserves_partial_text(api):
+    from mclaude.agent import run_agent
+
+    events = list(message_events(api["body"]))
+    api["events"] = [*events[:3], KeyboardInterrupt()]
+    history = []
+    chunks = []
+    with pytest.raises(KeyboardInterrupt):
+        run_agent(
+            "Hello",
+            ModelConfig(api_key="test-secret", model="test"),
+            history=history,
+            on_text=chunks.append,
+        )
+    partial = events[2]["delta"]["text"]
+    assert "".join(chunks) == partial + "\n"
+    assert history[-1]["content"] == [{"type": "text", "text": partial}]
+    assert api["stream_closed"] and api["client"].is_closed()
+
+
+@pytest.mark.parametrize("waiting_for_headers", [False, True])
+def test_ctrl_c_cancels_pending_network_wait(monkeypatch, waiting_for_headers):
+    """Deliver a real SIGINT while awaiting an otherwise unbounded response."""
+    clients = []
+    closed = []
+    interrupted_wait = []
+
+    async def stall():
+        asyncio.get_running_loop().call_soon(signal.raise_signal, signal.SIGINT)
+        try:
+            await asyncio.sleep(30)
+            pytest.fail("Ctrl+C did not interrupt the network wait")
+        except asyncio.CancelledError:
+            interrupted_wait.append(True)
+            raise
+
+    class Stream(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            await stall()
+            yield b""
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def handle(request):
+        if waiting_for_headers:
+            await stall()
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=Stream(),
+        )
+
+    def factory(**kwargs):
+        client = AsyncAnthropic(
+            **kwargs,
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+        )
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(provider, "AsyncAnthropic", factory)
+    original_handler = signal.getsignal(signal.SIGINT)
+    # pytest may install its own interrupt hook; emulate the standalone CLI.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            provider.create_message(
+                [{"role": "user", "content": "Hello"}],
+                ModelConfig(api_key="test-secret", model="test"),
+                on_text=lambda _: None,
+            )
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+    assert interrupted_wait == [True]
+    assert clients[0].is_closed()
+    if not waiting_for_headers:
+        assert closed == [True]

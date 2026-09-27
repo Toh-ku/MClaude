@@ -43,7 +43,7 @@ def _run_conversation(
     if interactive:
         print(
             "Interactive conversation. Enter /exit or /quit to leave; "
-            "Ctrl+C exits the program.",
+            "Ctrl+C cancels the current turn; at the input prompt it exits.",
             file=sys.stderr,
         )
     while True:
@@ -75,6 +75,12 @@ def _run_conversation(
                 permission_gate=permission_gate,
                 history=history,
                 on_text=display_text,
+            )
+        except KeyboardInterrupt:
+            if not interactive:
+                raise
+            print(
+                "\nTurn cancelled. You can continue the conversation.", file=sys.stderr
             )
         except ModelError as exc:
             print(f"Error: {exc}", file=sys.stderr)

@@ -147,7 +147,9 @@ def test_interactive_truncation_allows_followup(conversation, monkeypatch, capsy
 
 
 @pytest.mark.parametrize("during_request", [False, True])
-def test_interactive_interrupt_exits(conversation, monkeypatch, capsys, during_request):
+def test_interactive_interrupt_behavior(
+    conversation, monkeypatch, capsys, during_request
+):
     if during_request:
 
         def interrupt(*args, **kwargs):
@@ -158,7 +160,42 @@ def test_interactive_interrupt_exits(conversation, monkeypatch, capsys, during_r
     else:
         enter_lines(monkeypatch, [KeyboardInterrupt()])
 
-    assert cli.main(["-i"]) == 130
+    assert cli.main(["-i"]) == (0 if during_request else 130)
+    assert (
+        "Turn cancelled" if during_request else "interrupted"
+    ) in capsys.readouterr().err
+
+
+def test_cancelled_stream_can_be_followed_by_another_turn(
+    conversation, monkeypatch, capsys
+):
+    def request(messages, config, *, tools, on_text):
+        conversation.append(messages.copy())
+        if len(conversation) == 1:
+            on_text("Partial answer")
+            raise KeyboardInterrupt
+        on_text("New answer")
+        return ModelResponse((TextBlock("New answer"),), "end_turn")
+
+    monkeypatch.setattr("mclaude.agent.create_message", request)
+    enter_lines(monkeypatch, ["First", "Do something else", "/quit"])
+    assert cli.main(["-i"]) == 0
+    assert conversation[1][1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Partial answer"}],
+    }
+    assert conversation[1][-1]["content"] == "Do something else"
+    captured = capsys.readouterr()
+    assert captured.out == "Partial answer\nNew answer\n"
+    assert "Turn cancelled" in captured.err
+
+
+def test_single_turn_interrupt_returns_130(conversation, monkeypatch, capsys):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mclaude.agent.create_message", interrupt)
+    assert cli.main(["Hello"]) == 130
     assert "interrupted" in capsys.readouterr().err
 
 

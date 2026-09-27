@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mclaude.cancellation import TurnCancelled, protect_cleanup
 from mclaude.config import ModelConfig
 from mclaude.permissions import (
     PermissionAction,
@@ -122,15 +123,16 @@ def run_agent(
                 tools=TOOL_DEFINITIONS,
                 **({"on_text": emit_text} if on_text is not None else {}),
             )
-        except ModelError:
-            partial_text = "".join(chunks)
-            if partial_text.strip():
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": partial_text}],
-                    }
-                )
+        except (ModelError, KeyboardInterrupt):
+            with protect_cleanup():
+                partial_text = "".join(chunks)
+                if partial_text.strip():
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": partial_text}],
+                        }
+                    )
             raise
         finally:
             if on_text is not None and chunks and not "".join(chunks).endswith("\n"):
@@ -177,27 +179,66 @@ def run_agent(
         ]
         if not tool_calls:
             raise ModelError("The model requested tool use without a tool call.")
-        messages.append({"role": "assistant", "content": _assistant_content(response)})
         results: list[dict[str, Any]] = []
-        for call in tool_calls:
-            permission = permission_gate.check(
-                PermissionRequest(tool_name=call.name, tool_input=call.input)
-            )
-            if permission.action is PermissionAction.ALLOW:
-                result = _execute_tool(call, workspace, max_file_chars=max_file_chars)
-            else:
-                result = ToolResult(
-                    f"Permission denied for tool '{call.name}': {permission.reason}",
-                    is_error=True,
+        assistant_message = {
+            "role": "assistant",
+            "content": _assistant_content(response),
+        }
+        result_message = {"role": "user", "content": results}
+        active_call: str | None = None
+        executing = False
+        try:
+            messages.append(assistant_message)
+            for call in tool_calls:
+                active_call = call.id
+                executing = False
+                permission = permission_gate.check(
+                    PermissionRequest(tool_name=call.name, tool_input=call.input)
                 )
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
-                    "content": result.content,
-                    "is_error": result.is_error,
-                }
-            )
-        messages.append({"role": "user", "content": results})
+                if permission.action is PermissionAction.ALLOW:
+                    executing = True
+                    result = _execute_tool(
+                        call, workspace, max_file_chars=max_file_chars
+                    )
+                else:
+                    result = ToolResult(
+                        f"Permission denied for tool '{call.name}': "
+                        f"{permission.reason}",
+                        is_error=True,
+                    )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "content": result.content,
+                        "is_error": result.is_error,
+                    }
+                )
+            messages.append(result_message)
+        except KeyboardInterrupt as exc:
+            with protect_cleanup():
+                completed = {result["tool_use_id"] for result in results}
+                for call in tool_calls:
+                    if call.id in completed:
+                        continue
+                    detail = "Not executed: the user cancelled this turn."
+                    if call.id == active_call and executing:
+                        detail = (
+                            str(exc)
+                            if isinstance(exc, TurnCancelled)
+                            else "Tool interrupted by the user. It may have partially "
+                            "executed; inspect the workspace before retrying."
+                        )
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call.id,
+                            "content": detail,
+                            "is_error": True,
+                        }
+                    )
+                if messages[-1] is assistant_message:
+                    messages.append(result_message)
+            raise
 
     raise ModelError(f"Agent exceeded the maximum of {max_iterations} model requests.")

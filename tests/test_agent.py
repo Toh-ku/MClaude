@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from mclaude.agent import run_agent
+from mclaude.cancellation import TurnCancelled
 from mclaude.config import ModelConfig
 from mclaude.permissions import PermissionAction, PermissionDecision, PermissionGate
 from mclaude.provider import ModelError, ModelResponse, TextBlock, ToolUseBlock
@@ -423,3 +424,67 @@ def test_conversations_are_independent_and_budget_resets(config: ModelConfig):
         run_agent(prompt, config, history=history, request=request, max_iterations=1)
     assert len(calls[1]) == 3
     assert calls[2] == [{"role": "user", "content": "Separate"}]
+
+
+@pytest.mark.parametrize("during_permission", [False, True])
+def test_cancelled_tool_batch_keeps_results_and_skips_remaining_calls(
+    config, tmp_path, monkeypatch, during_permission
+):
+    history = []
+    executions = []
+    responses = iter(
+        [
+            ModelResponse(
+                (
+                    ToolUseBlock("first", "read_file", {"path": "a"}),
+                    ToolUseBlock("active", "run_command", {"command": "test"}),
+                    ToolUseBlock("remaining", "read_file", {"path": "b"}),
+                ),
+                "tool_use",
+            ),
+            ModelResponse((TextBlock("Continued"),), "end_turn"),
+        ]
+    )
+
+    def request(messages, request_config, *, tools):
+        return next(responses)
+
+    def execute(call, workspace, **kwargs):
+        executions.append(call.id)
+        if call.id == "active":
+            raise TurnCancelled(
+                "Command cancelled; process tree terminated.\nstdout: partial"
+            )
+        assert call.id == "first"
+        return ToolResult("Original contents")
+
+    def approve(request, reason):
+        if during_permission:
+            raise KeyboardInterrupt
+        return True
+
+    monkeypatch.setattr("mclaude.agent._execute_tool", execute)
+    with pytest.raises(KeyboardInterrupt):
+        run_agent(
+            "Run tools",
+            config,
+            history=history,
+            workspace=tmp_path,
+            request=request,
+            permission_gate=PermissionGate(prompt=approve),
+        )
+    assert executions == (["first"] if during_permission else ["first", "active"])
+    results = history[-1]["content"]
+    assert [r["tool_use_id"] for r in results] == ["first", "active", "remaining"]
+    assert results[0]["content"] == "Original contents"
+    assert [r["is_error"] for r in results] == [False, True, True]
+    if during_permission:
+        assert "Not executed" in results[1]["content"]
+    else:
+        assert "stdout: partial" in results[1]["content"]
+    assert "Not executed" in results[2]["content"]
+    assert (
+        run_agent("Continue", config, history=history, request=request).text
+        == "Continued"
+    )
+    assert len(history) == 5
