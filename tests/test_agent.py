@@ -47,7 +47,11 @@ def test_agent_reads_file_and_returns_final_answer(
     assert result.truncated is False
     assert len(calls) == 2
     assert calls[0][0] == [{"role": "user", "content": "Summarize notes.txt"}]
-    assert calls[0][2][0]["name"] == "read_file"
+    assert [tool["name"] for tool in calls[0][2]] == [
+        "read_file",
+        "find_files",
+        "search_text",
+    ]
     assert calls[1][0][1] == {
         "role": "assistant",
         "content": [
@@ -105,6 +109,36 @@ def test_multiple_tool_calls_execute_in_order_and_return_failures(
     assert results[0]["is_error"] is False
     assert "not found" in results[1]["content"]
     assert results[1]["is_error"] is True
+
+
+def test_agent_executes_workspace_search_tools(
+    tmp_path: Path, config: ModelConfig
+) -> None:
+    (tmp_path / "module.py").write_text("def target():\n    pass\n", encoding="utf-8")
+    seen_messages = []
+    responses = iter(
+        [
+            ModelResponse(
+                content=(
+                    ToolUseBlock("find", "find_files", {"pattern": "*.py"}),
+                    ToolUseBlock("search", "search_text", {"query": "target"}),
+                ),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(content=(TextBlock("Found it"),), stop_reason="end_turn"),
+        ]
+    )
+
+    def request(messages, request_config, *, tools):
+        seen_messages.append(messages.copy())
+        return next(responses)
+
+    result = run_agent("Locate target", config, workspace=tmp_path, request=request)
+
+    assert result.text == "Found it"
+    tool_results = seen_messages[1][-1]["content"]
+    assert tool_results[0]["content"] == "module.py"
+    assert tool_results[1]["content"] == "module.py:1:def target():"
 
 
 def test_agent_preserves_partial_text_when_output_is_truncated(

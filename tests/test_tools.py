@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mclaude.tools import read_file
+from mclaude.tools import find_files, read_file, search_text
 
 
 def test_read_file_reads_utf8_text(tmp_path: Path) -> None:
@@ -59,3 +59,90 @@ def test_read_file_reports_non_utf8_file(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert "UnicodeDecodeError" in result.content
+
+
+def test_find_files_uses_globs_and_skips_git_metadata(tmp_path: Path) -> None:
+    (tmp_path / "root.py").write_text("", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.py").write_text("", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "code.py").write_text("", encoding="utf-8")
+
+    python_files = find_files({"pattern": "*.py"}, tmp_path)
+
+    assert python_files.content.splitlines() == ["root.py", "sub/code.py"]
+
+
+def test_workspace_search_does_not_apply_gitignore_rules(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (tmp_path / "ignored.py").write_text("needle\n", encoding="utf-8")
+
+    files = find_files({"pattern": "**/*.py"}, tmp_path)
+    matches = search_text({"query": "needle"}, tmp_path)
+
+    assert files.content == "ignored.py"
+    assert matches.content == "ignored.py:1:needle"
+
+
+def test_find_files_bounds_results_and_validates_input(tmp_path: Path) -> None:
+    for name in ["a.txt", "b.txt", "c.txt"]:
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    result = find_files({"pattern": "*.txt"}, tmp_path, max_results=2)
+
+    assert result.content.splitlines() == [
+        "a.txt",
+        "b.txt",
+        "[Results truncated after 2 files.]",
+    ]
+    assert find_files({}, tmp_path).is_error is True
+
+
+def test_search_text_returns_paths_lines_and_respects_scope(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "one.py").write_text(
+        "first\nNeedle here\nneedle again\n", encoding="utf-8"
+    )
+    (tmp_path / "outside.py").write_text("Needle outside\n", encoding="utf-8")
+    (tmp_path / "src" / "binary.dat").write_bytes(b"Needle\xff")
+
+    result = search_text(
+        {"query": "needle", "path": "src", "case_sensitive": False}, tmp_path
+    )
+
+    assert result.content.splitlines() == [
+        "src/one.py:2:Needle here",
+        "src/one.py:3:needle again",
+    ]
+
+
+def test_search_text_supports_regex_bounds_and_errors(tmp_path: Path) -> None:
+    (tmp_path / "code.py").write_text("alpha1\nalpha2\nalpha3\n", encoding="utf-8")
+
+    result = search_text(
+        {"query": r"alpha\d", "is_regex": True}, tmp_path, max_results=2
+    )
+
+    assert result.content.splitlines() == [
+        "code.py:1:alpha1",
+        "code.py:2:alpha2",
+        "[Results truncated after 2 matches.]",
+    ]
+    assert search_text({"query": "[", "is_regex": True}, tmp_path).is_error is True
+    outside = search_text({"query": "x", "path": "../outside"}, tmp_path)
+    assert outside.is_error is True
+    assert "outside the workspace" in outside.content
+
+
+def test_search_text_skips_oversized_files_and_truncates_lines(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_text("needle" * 10, encoding="utf-8")
+    (tmp_path / "line.txt").write_text("needle and more", encoding="utf-8")
+
+    result = search_text(
+        {"query": "needle"},
+        tmp_path,
+        max_file_bytes=20,
+        max_line_chars=6,
+    )
+
+    assert result.content == "line.txt:1:needle…"

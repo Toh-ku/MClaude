@@ -13,7 +13,13 @@ from mclaude.provider import (
     ToolUseBlock,
     create_message,
 )
-from mclaude.tools import READ_FILE_DEFINITION, ToolResult, read_file
+from mclaude.tools import (
+    TOOL_DEFINITIONS,
+    ToolResult,
+    find_files,
+    read_file,
+    search_text,
+)
 
 DEFAULT_MAX_ITERATIONS = 8
 DEFAULT_MAX_FILE_CHARS = 100_000
@@ -48,6 +54,10 @@ def _execute_tool(
     block: ToolUseBlock, workspace: Path, *, max_file_chars: int
 ) -> ToolResult:
     if block.name != "read_file":
+        if block.name == "find_files":
+            return find_files(block.input, workspace)
+        if block.name == "search_text":
+            return search_text(block.input, workspace)
         return ToolResult(f"Unknown tool: {block.name}", is_error=True)
     return read_file(block.input, workspace, max_chars=max_file_chars)
 
@@ -74,7 +84,7 @@ def run_agent(
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
     for _ in range(max_iterations):
-        response = request(messages, config, tools=[READ_FILE_DEFINITION])
+        response = request(messages, config, tools=TOOL_DEFINITIONS)
         text = "\n".join(
             block.text for block in response.content if isinstance(block, TextBlock)
         )
