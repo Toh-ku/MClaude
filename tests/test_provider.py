@@ -192,3 +192,22 @@ def test_cli_api_error_has_no_traceback_or_secrets(api, monkeypatch, capsys):
     assert "Authentication failed" in captured.err
     assert "test-secret" not in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_interactive_history_reaches_sdk(api, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-secret")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "test-model")
+    lines = iter(["你好", "请用中文回答", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda: next(lines))
+
+    assert cli.main(["--interactive", "--max-iterations", "1"]) == 0
+    assert len(api["requests"]) == 2
+    assert json.loads(api["requests"][1].content)["messages"] == [
+        {"role": "user", "content": "你好"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello from the model"}],
+        },
+        {"role": "user", "content": "请用中文回答"},
+    ]
+    assert capsys.readouterr().out == "Hello from the model\n" * 2

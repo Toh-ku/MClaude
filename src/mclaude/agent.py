@@ -1,4 +1,4 @@
-"""Minimal model/tool loop for a single user task."""
+"""Model/tool loop with optional in-memory conversation history."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,8 +85,13 @@ def run_agent(
     max_file_chars: int = DEFAULT_MAX_FILE_CHARS,
     request: ModelRequest | None = None,
     permission_gate: PermissionGate | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> AgentResponse:
-    """Run until the model answers, truncates, fails, or exhausts the loop limit."""
+    """Run one turn, appending messages to history when supplied.
+
+    Completed tool exchanges remain in history even if a later request fails.
+    Each turn receives a fresh request budget; previous tools are never replayed.
+    """
     if not prompt.strip():
         raise ModelError("The prompt must not be empty.")
     if max_iterations <= 0:
@@ -97,7 +102,8 @@ def run_agent(
     workspace = (workspace or Path.cwd()).resolve()
     request = request or create_message
     permission_gate = permission_gate or PermissionGate()
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    messages = history if history is not None else []
+    messages.append({"role": "user", "content": prompt})
 
     for _ in range(max_iterations):
         response = request(messages, config, tools=TOOL_DEFINITIONS)
@@ -110,6 +116,17 @@ def run_agent(
                 raise ModelError(
                     "The model output was truncated before producing text."
                 )
+            # Incomplete tool calls must not enter the next request's history.
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": block.text}
+                        for block in response.content
+                        if isinstance(block, TextBlock)
+                    ],
+                }
+            )
             return AgentResponse(text=text, truncated=True)
 
         if response.stop_reason == "end_turn":
@@ -117,6 +134,9 @@ def run_agent(
                 raise ModelError("The model ended while requesting a tool.")
             if not text.strip():
                 raise ModelError("The model returned no text.")
+            messages.append(
+                {"role": "assistant", "content": _assistant_content(response)}
+            )
             return AgentResponse(text=text)
 
         if response.stop_reason != "tool_use":

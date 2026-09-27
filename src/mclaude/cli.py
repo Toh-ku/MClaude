@@ -5,6 +5,7 @@ import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -27,6 +28,61 @@ def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
     return answer.strip().casefold() in {"y", "yes"}
 
 
+def _run_conversation(
+    prompt: str | None,
+    config: ModelConfig,
+    *,
+    interactive: bool,
+    max_iterations: int,
+) -> int:
+    """Run one task or read successive turns using a shared message history."""
+    history: list[dict[str, Any]] = []
+    workspace = Path.cwd()
+    permission_gate = PermissionGate(prompt=_prompt_tool_permission)
+    exit_code = 0
+    if interactive:
+        print(
+            "Interactive conversation. Enter /exit or /quit to leave; "
+            "Ctrl+C exits the program.",
+            file=sys.stderr,
+        )
+    while True:
+        if prompt is None:
+            print("You> ", end="", file=sys.stderr, flush=True)
+            try:
+                prompt = input()
+            except EOFError:
+                print(file=sys.stderr)
+                return exit_code
+            if prompt.strip().casefold() in {"/exit", "/quit"}:
+                return exit_code
+            if not prompt.strip():
+                prompt = None
+                continue
+        try:
+            response = run_agent(
+                prompt,
+                config,
+                workspace=workspace,
+                max_iterations=max_iterations,
+                permission_gate=permission_gate,
+                history=history,
+            )
+        except ModelError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            exit_code = 1
+        else:
+            print(response.text, flush=True)
+            if response.truncated:
+                print(
+                    "Error: Output truncated; increase --max-tokens.", file=sys.stderr
+                )
+                exit_code = 1
+        if not interactive:
+            return exit_code
+        prompt = None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse command-line options and run the application."""
     parser = argparse.ArgumentParser(
@@ -38,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Start a conversation, optionally beginning with the supplied prompt",
+    )
     parser.add_argument("--model", help="Model ID (overrides ANTHROPIC_MODEL)")
     parser.add_argument(
         "--max-tokens",
@@ -55,13 +117,14 @@ def main(argv: list[str] | None = None) -> int:
         "--max-iterations",
         type=int,
         default=DEFAULT_MAX_ITERATIONS,
-        help=f"Maximum model requests (default: {DEFAULT_MAX_ITERATIONS})",
+        help=f"Maximum model requests per turn (default: {DEFAULT_MAX_ITERATIONS})",
     )
     args = parser.parse_args(argv)
-    if args.prompt is None:
+    interactive = args.interactive or (args.prompt is None and sys.stdin.isatty())
+    if args.prompt is None and not interactive:
         parser.print_help()
         return 0
-    if not args.prompt.strip():
+    if args.prompt is not None and not args.prompt.strip():
         parser.error("The prompt must not be empty.")
     if args.max_iterations <= 0:
         parser.error("--max-iterations must be a positive integer.")
@@ -73,20 +136,12 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigurationError as exc:
         parser.error(str(exc))
     try:
-        response = run_agent(
+        return _run_conversation(
             args.prompt,
             config,
+            interactive=interactive,
             max_iterations=args.max_iterations,
-            permission_gate=PermissionGate(prompt=_prompt_tool_permission),
         )
-    except ModelError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
     except KeyboardInterrupt:
-        print("Request interrupted.", file=sys.stderr)
+        print("\nRequest interrupted.", file=sys.stderr)
         return 130
-    print(response.text)
-    if response.truncated:
-        print("Error: Output truncated; increase --max-tokens.", file=sys.stderr)
-        return 1
-    return 0

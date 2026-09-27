@@ -326,3 +326,100 @@ def test_agent_enforces_iteration_limit(config: ModelConfig) -> None:
             max_iterations=2,
             request=lambda *args, **kwargs: response,
         )
+
+
+@pytest.mark.parametrize("failure", ["request", "limit"])
+def test_followup_retains_executed_tools_after_failure(
+    tmp_path: Path, config: ModelConfig, failure: str
+) -> None:
+    history = []
+    calls = []
+    approvals = []
+
+    def request(messages, request_config, *, tools):
+        calls.append(messages.copy())
+        if len(calls) == 1:
+            return ModelResponse(
+                (
+                    ToolUseBlock(
+                        "write", "create_file", {"path": "new.txt", "content": "hi"}
+                    ),
+                ),
+                "tool_use",
+            )
+        if failure == "request" and len(calls) == 2:
+            raise ModelError("Request failed")
+        return ModelResponse((TextBlock("Done"),), "end_turn")
+
+    def approve(permission_request, reason):
+        approvals.append(permission_request)
+        return True
+
+    with pytest.raises(ModelError, match="Request failed|maximum of 1"):
+        run_agent(
+            "Create a file",
+            config,
+            history=history,
+            workspace=tmp_path,
+            request=request,
+            max_iterations=1 if failure == "limit" else 2,
+            permission_gate=PermissionGate(prompt=approve),
+        )
+
+    assert (tmp_path / "new.txt").read_text() == "hi"
+    assert len(history) == 3
+    assert history[1]["content"][0]["id"] == "write"
+    assert history[2]["content"][0]["tool_use_id"] == "write"
+    assert history[2]["content"][0]["is_error"] is False
+    assert (
+        run_agent(
+            "Summarize what happened",
+            config,
+            history=history,
+            workspace=tmp_path,
+            request=request,
+            max_iterations=1,
+            permission_gate=PermissionGate(prompt=approve),
+        ).text
+        == "Done"
+    )
+    assert len(approvals) == 1
+    assert len(history) == 5
+
+
+def test_truncated_tool_call_is_not_saved_or_executed(config: ModelConfig, monkeypatch):
+    history = []
+
+    def unexpected_execution(*args, **kwargs):
+        pytest.fail("Truncated tool call was executed")
+
+    monkeypatch.setattr("mclaude.agent._execute_tool", unexpected_execution)
+    response = ModelResponse(
+        (TextBlock("Partial"), ToolUseBlock("incomplete", "read_file", {})),
+        "max_tokens",
+    )
+    assert run_agent(
+        "Question", config, history=history, request=lambda *a, **kw: response
+    ).truncated
+    assert history[-1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Partial"}],
+    }
+
+
+def test_conversations_are_independent_and_budget_resets(config: ModelConfig):
+    histories = [[], []]
+    calls = []
+
+    def request(messages, request_config, *, tools):
+        calls.append(messages.copy())
+        return ModelResponse((TextBlock("Answer"),), "end_turn")
+
+    for history, prompt in [
+        (histories[0], "First"),
+        (histories[0], "Followup"),
+        (histories[1], "Separate"),
+    ]:
+        run_agent(prompt, config, history=history, request=request, max_iterations=1)
+    assert len(calls[1]) == 3
+    assert calls[2] == [{"role": "user", "content": "Separate"}]
