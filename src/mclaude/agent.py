@@ -33,6 +33,7 @@ from mclaude.provider import (
     ToolUseBlock,
     create_message,
 )
+from mclaude.scheduler import ToolScheduler
 from mclaude.skills import LOAD_SKILL_DEFINITION, SkillCatalog
 from mclaude.subagents import DELEGATE_DEFINITION, SubagentRunner
 from mclaude.tasks import TASK_DEFINITIONS, TaskBoard
@@ -127,6 +128,7 @@ def run_agent(
     allowed_tools: frozenset[str] | None = None,
     subagent_budget: int = 8,
     subagent_depth: int = 0,
+    read_workers: int = 4,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -142,6 +144,7 @@ def run_agent(
     if type(subagent_budget) is not int or not 0 <= subagent_budget <= 32:
         raise ValueError("subagent_budget must be between 0 and 32.")
 
+    ToolScheduler(read_workers)  # Validate before any model or external process.
     workspace = (workspace or Path.cwd()).resolve()
     checkpoint_store = checkpoint_store or CheckpointStore(workspace)
     project_instructions = project_instructions or load_project_instructions(workspace)
@@ -282,116 +285,128 @@ def run_agent(
         ]
         if not tool_calls:
             raise ModelError("The model requested tool use without a tool call.")
+        if len({call.id for call in tool_calls}) != len(tool_calls):
+            raise ModelError("The model returned duplicate tool call IDs.")
         results: list[dict[str, Any]] = []
         assistant_message = {
             "role": "assistant",
             "content": _assistant_content(response),
         }
         result_message = {"role": "user", "content": results}
-        active_call: str | None = None
-        executing = False
+        scheduler = ToolScheduler(read_workers, enabled=hooks is None or planning)
+        call_order = {call.id: index for index, call in enumerate(tool_calls)}
+
+        def prepare(call: ToolUseBlock) -> ToolResult | None:
+            if allowed_tools is not None and call.name not in allowed_tools:
+                permission = PermissionDecision(
+                    PermissionAction.DENY,
+                    "Tool is outside this agent's allowed set.",
+                )
+            elif planning and call.name not in READ_ONLY_TOOLS:
+                permission = PermissionDecision(
+                    PermissionAction.DENY, "Tool is blocked in planning mode."
+                )
+            else:
+                permission = permission_gate.check(
+                    PermissionRequest(
+                        tool_name=call.name,
+                        tool_input=call.input,
+                        external=mcp is not None and call.name in mcp.routes,
+                    )
+                )
+            if permission.action is PermissionAction.ALLOW:
+                return None
+            return ToolResult(
+                f"Permission denied for tool '{call.name}': {permission.reason}",
+                is_error=True,
+            )
+
+        def execute_call(call: ToolUseBlock) -> ToolResult:
+            def execute() -> ToolResult:
+                if call.name in {"list_tasks", "update_tasks"}:
+                    return task_board.execute(call.name, call.input, on_history_event)
+                if call.name == "load_skill":
+                    return skills.load(call.input)
+                if mcp is not None and call.name in mcp.routes:
+                    return mcp.execute(call.name, call.input)
+                if call.name == "delegate_readonly":
+                    return subagents.execute(
+                        call.input,
+                        config=config,
+                        workspace=workspace,
+                        request=request,
+                        permission_gate=permission_gate,
+                        context_budget_tokens=context_budget_tokens,
+                        max_file_chars=max_file_chars,
+                    )
+                return _execute_tool(
+                    call,
+                    workspace,
+                    max_file_chars=max_file_chars,
+                    checkpoints=checkpoint_store,
+                )
+
+            return (
+                hooks.execute(call.name, call.input, workspace, execute)
+                if hooks is not None and not planning
+                else execute()
+            )
+
+        def record_result(
+            call: ToolUseBlock,
+            result: ToolResult,
+            results: list[dict[str, Any]] = results,
+            system_prompt: str = system_prompt,
+            call_order: dict[str, int] = call_order,
+        ) -> None:
+            if any(item["tool_use_id"] == call.id for item in results):
+                return
+            original_content = result.content
+
+            def build_messages(
+                candidate: str,
+                *,
+                call_id: str = call.id,
+                error: bool = result.is_error,
+                prior_results: list[dict[str, Any]] = results,
+            ) -> list[dict[str, Any]]:
+                candidate_result = {
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": candidate,
+                    "is_error": error,
+                }
+                return [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": [*prior_results, candidate_result],
+                    },
+                ]
+
+            fitted_content, budget_truncated = context_budget.fit_tool_result(
+                original_content,
+                build_messages,
+                tools=tool_definitions,
+                system=system_prompt,
+            )
+            result_block = {
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": fitted_content,
+                "is_error": result.is_error or budget_truncated,
+            }
+            with protect_cleanup():
+                if on_history_event is not None:
+                    on_history_event("tool_result", result_block)
+                results.append(result_block)
+                results.sort(key=lambda item: call_order[item["tool_use_id"]])
+
         try:
             messages.append(assistant_message)
             if on_history_event is not None:
                 on_history_event("message", assistant_message)
-            for call in tool_calls:
-                active_call = call.id
-                executing = False
-                if allowed_tools is not None and call.name not in allowed_tools:
-                    permission = PermissionDecision(
-                        PermissionAction.DENY,
-                        "Tool is outside this agent's allowed set.",
-                    )
-                elif planning and call.name not in READ_ONLY_TOOLS:
-                    permission = PermissionDecision(
-                        PermissionAction.DENY, "Tool is blocked in planning mode."
-                    )
-                else:
-                    permission = permission_gate.check(
-                        PermissionRequest(
-                            tool_name=call.name,
-                            tool_input=call.input,
-                            external=mcp is not None and call.name in mcp.routes,
-                        )
-                    )
-                if permission.action is PermissionAction.ALLOW:
-                    executing = True
-
-                    def execute(call: ToolUseBlock = call) -> ToolResult:
-                        if call.name in {"list_tasks", "update_tasks"}:
-                            return task_board.execute(
-                                call.name, call.input, on_history_event
-                            )
-                        if call.name == "load_skill":
-                            return skills.load(call.input)
-                        if mcp is not None and call.name in mcp.routes:
-                            return mcp.execute(call.name, call.input)
-                        if call.name == "delegate_readonly":
-                            return subagents.execute(
-                                call.input,
-                                config=config,
-                                workspace=workspace,
-                                request=request,
-                                permission_gate=permission_gate,
-                                context_budget_tokens=context_budget_tokens,
-                                max_file_chars=max_file_chars,
-                            )
-                        return _execute_tool(
-                            call,
-                            workspace,
-                            max_file_chars=max_file_chars,
-                            checkpoints=checkpoint_store,
-                        )
-
-                    result = (
-                        hooks.execute(call.name, call.input, workspace, execute)
-                        if hooks is not None and not planning
-                        else execute()
-                    )
-                else:
-                    result = ToolResult(
-                        f"Permission denied for tool '{call.name}': "
-                        f"{permission.reason}",
-                        is_error=True,
-                    )
-                original_content = result.content
-
-                def build_messages(
-                    candidate: str,
-                    *,
-                    call_id: str = call.id,
-                    error: bool = result.is_error,
-                    prior_results: list[dict[str, Any]] = results,
-                ) -> list[dict[str, Any]]:
-                    candidate_result = {
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
-                        "content": candidate,
-                        "is_error": error,
-                    }
-                    return [
-                        *messages,
-                        {
-                            "role": "user",
-                            "content": [*prior_results, candidate_result],
-                        },
-                    ]
-
-                fitted_content, budget_truncated = context_budget.fit_tool_result(
-                    original_content,
-                    build_messages,
-                    tools=tool_definitions,
-                    system=system_prompt,
-                )
-                result_block = {
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
-                    "content": fitted_content,
-                    "is_error": result.is_error or budget_truncated,
-                }
-                results.append(result_block)
-                if on_history_event is not None:
-                    on_history_event("tool_result", result_block)
+            scheduler.run(tool_calls, prepare, execute_call, record_result)
             messages.append(result_message)
         except KeyboardInterrupt as exc:
             with protect_cleanup():
@@ -400,7 +415,7 @@ def run_agent(
                     if call.id in completed:
                         continue
                     detail = "Not executed: the user cancelled this turn."
-                    if call.id == active_call and executing:
+                    if call.id in scheduler.started:
                         detail = (
                             str(exc)
                             if isinstance(exc, TurnCancelled)
@@ -416,6 +431,7 @@ def run_agent(
                     results.append(result_block)
                     if on_history_event is not None:
                         on_history_event("tool_result", result_block)
+                results.sort(key=lambda item: call_order[item["tool_use_id"]])
                 if messages[-1] is assistant_message:
                     messages.append(result_message)
             raise

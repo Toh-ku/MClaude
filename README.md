@@ -136,13 +136,15 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 实现 [MCP 2025-06-18 stdio 生命周期](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)、`tools/list` 分页和 `tools/call`；允许协商 2025-03-26、2024-11-05。只支持工具与文本/结构化 JSON 结果，非文本内容标记省略；不支持 HTTP、资源、提示模板、sampling 或 elicitation。服务名限 20 字符、工具名限 35 字符，仅字母、数字、下划线和连字符；最多 10 个服务、100 个工具。单条消息 1 MB，工具文本最多 100,000 字符，超出会截断并标错。Python 服务需使用 UTF-8 标准输入输出。
 
-## 开发检查
-
 ## 只读子 Agent
 
 `delegate_readonly` 接收独立调查提示和可选 `max_iterations`（1–4），创建全新历史，仅允许 `read_file`、`find_files`、`search_text`。父对话、任务状态、Hooks 和 MCP 连接不传入子 Agent；子 Agent 仍加载工作区项目规则。父 Agent 只收到最多 16,000 字符的最终报告。禁止递归委派，写入和命令即使被模型请求也会在运行时拒绝。
 
 `--subagent-budget` 控制每轮所有委派合计的模型请求预算，默认 8、范围 0–32；设为 0 禁用委派。单个子 Agent 最多 4 次请求，失败与预算耗尽作为工具错误返回父 Agent。预算按逻辑模型请求计数，已有 API 重试策略仍适用。Ctrl+C 取消会向父轮次传播，不遗留后台子 Agent。
+
+## 只读并发
+
+连续的 `read_file`、`find_files`、`search_text` 调用可并发执行，默认 4 个工作线程；`--read-workers 1` 切回串行，最多可设 16。权限判断和会话写入始终位于主线程，结果按 tool call ID 关联，在当前历史中按调用顺序排列。写入、命令、任务状态修改、技能加载、子 Agent 和 MCP 调用形成顺序边界，不会跨越它们并发；启用 Hooks 后所有工具串行执行。取消时停止排队任务、通知搜索线程退出、保存已完成结果，并为剩余调用补齐错误。
 
 ## 开发检查
 

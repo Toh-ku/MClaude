@@ -50,6 +50,7 @@ def _run_conversation(
     hooks: HookRunner | None = None,
     mcp: MCPRegistry | None = None,
     subagent_budget: int = 8,
+    read_workers: int = 4,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
@@ -125,6 +126,7 @@ def _run_conversation(
                 hooks=hooks,
                 mcp=mcp,
                 subagent_budget=subagent_budget,
+                read_workers=read_workers,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )
@@ -167,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "--read-workers",
+        type=int,
+        default=4,
+        help="Concurrent local read tools (1-16; default: 4)",
+    )
     parser.add_argument(
         "--subagent-budget",
         type=int,
@@ -291,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-iterations must be a positive integer.")
     if not 0 <= args.subagent_budget <= 32:
         parser.error("--subagent-budget must be between 0 and 32.")
+    if not 1 <= args.read_workers <= 16:
+        parser.error("--read-workers must be between 1 and 16.")
     if args.context_budget <= args.max_tokens:
         parser.error("--context-budget must be greater than --max-tokens.")
     load_dotenv(Path.cwd() / ".env", override=False)
@@ -344,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
                 hooks=hooks,
                 mcp=mcp,
                 subagent_budget=args.subagent_budget,
+                read_workers=args.read_workers,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)

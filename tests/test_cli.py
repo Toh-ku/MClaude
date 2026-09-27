@@ -79,6 +79,42 @@ def enter_lines(monkeypatch, lines):
     monkeypatch.setattr("builtins.input", read_line)
 
 
+def test_tasks_can_be_viewed_after_cli_resume(conversation, monkeypatch, capsys):
+    tasks = [{"id": "step", "description": "persisted task", "status": "blocked"}]
+    responses = iter(
+        [
+            ModelResponse(
+                (ToolUseBlock("tasks", "update_tasks", {"tasks": tasks}),), "tool_use"
+            ),
+            ModelResponse((TextBlock("saved"),), "end_turn"),
+        ]
+    )
+    monkeypatch.setattr("mclaude.agent.create_message", lambda *a, **k: next(responses))
+    enter_lines(monkeypatch, ["/exit"])
+    assert cli.main(["-i", "track work"]) == 0
+    capsys.readouterr()
+    enter_lines(monkeypatch, ["/tasks", "/exit"])
+    assert cli.main(["--continue"]) == 0
+    assert "persisted task" in capsys.readouterr().out
+
+
+def test_interactive_mode_switches_enforced_tools(conversation, monkeypatch):
+    seen = []
+
+    def request(messages, config, **kwargs):
+        seen.append({tool["name"] for tool in kwargs["tools"]})
+        return ModelResponse((TextBlock("done"),), "end_turn")
+
+    monkeypatch.setattr("mclaude.agent.create_message", request)
+    enter_lines(
+        monkeypatch, ["analyze", "/execute", "work", "/plan", "analyze again", "/exit"]
+    )
+    assert cli.main(["-i", "--plan", "--no-persist"]) == 0
+    assert "create_file" not in seen[0]
+    assert "create_file" in seen[1]
+    assert "create_file" not in seen[2]
+
+
 @pytest.mark.parametrize("args", [[], ["--interactive"], ["-i", "First question"]])
 def test_interactive_followup_preserves_history(
     args, conversation, monkeypatch, capsys

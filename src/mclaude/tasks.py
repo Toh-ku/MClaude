@@ -56,7 +56,8 @@ def validate_tasks(value: Any) -> list[dict[str, str]]:
         for key, limit in (("id", 64), ("description", 1000), ("status", 20)):
             if (
                 not isinstance(item[key], str)
-                or not 1 <= len(item[key].strip()) <= limit
+                or not item[key].strip()
+                or len(item[key]) > limit
             ):
                 raise ValueError(f"Invalid task {key}.")
         if item["status"] not in {"pending", "in_progress", "completed", "blocked"}:

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pathspec import PathSpec
 
-from mclaude.cancellation import TurnCancelled, protect_cleanup
+from mclaude.cancellation import TurnCancelled, check_read_cancelled, protect_cleanup
 from mclaude.checkpoints import CheckpointError, CheckpointStore
 
 DEFAULT_MAX_SEARCH_RESULTS = 200
@@ -216,6 +216,7 @@ def _workspace_files(workspace: Path):
     """Yield safe workspace files in stable path order."""
 
     def walk(directory: Path):
+        check_read_cancelled()
         try:
             entries = sorted(
                 directory.iterdir(), key=lambda entry: entry.name.casefold()
@@ -223,6 +224,7 @@ def _workspace_files(workspace: Path):
         except OSError:
             return
         for entry in entries:
+            check_read_cancelled()
             if entry.name == ".git":
                 continue
             try:
@@ -458,6 +460,7 @@ def search_text(
             continue
         relative = path.relative_to(workspace).as_posix()
         for line_number, line in enumerate(content.splitlines(), start=1):
+            check_read_cancelled()
             if not regex.search(line):
                 continue
             if len(matches) == max_results:

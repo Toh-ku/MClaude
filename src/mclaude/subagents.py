@@ -55,7 +55,7 @@ class SubagentRunner:
             return ToolResult("Invalid delegation arguments.", True)
         prompt = arguments.get("prompt")
         iterations = arguments.get("max_iterations", 4)
-        if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 8000:
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000:
             return ToolResult("Subagent prompt must be 1-8,000 characters.", True)
         if type(iterations) is not int or not 1 <= iterations <= 4:
             return ToolResult("Subagent max_iterations must be 1-4.", True)
