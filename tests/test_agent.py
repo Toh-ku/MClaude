@@ -8,6 +8,7 @@ from mclaude.agent import run_agent
 from mclaude.config import ModelConfig
 from mclaude.permissions import PermissionAction, PermissionDecision, PermissionGate
 from mclaude.provider import ModelError, ModelResponse, TextBlock, ToolUseBlock
+from mclaude.tools import ToolResult
 
 
 @pytest.fixture
@@ -54,6 +55,7 @@ def test_agent_reads_file_and_returns_final_answer(
         "search_text",
         "create_file",
         "replace_text",
+        "run_command",
     ]
     assert calls[1][0][1] == {
         "role": "assistant",
@@ -228,6 +230,52 @@ def test_agent_asks_before_creating_file(tmp_path: Path, config: ModelConfig) ->
     assert result.text == "Created it."
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "new content\n"
     assert prompts == [("create_file", "This tool modifies workspace files.")]
+
+
+def test_agent_asks_before_running_command(
+    tmp_path: Path,
+    config: ModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            ModelResponse(
+                content=(
+                    ToolUseBlock("command", "run_command", {"command": "pytest"}),
+                ),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(
+                content=(TextBlock("Tests passed."),), stop_reason="end_turn"
+            ),
+        ]
+    )
+    prompts = []
+    executions = []
+
+    def request(messages, request_config, *, tools):
+        return next(responses)
+
+    def approve(permission_request, reason):
+        prompts.append((permission_request.tool_name, reason))
+        return True
+
+    def execute(tool_input, workspace):
+        executions.append((tool_input, workspace))
+        return ToolResult("Exit code: 0\n[no output]")
+
+    monkeypatch.setattr("mclaude.agent.run_command", execute)
+    result = run_agent(
+        "Run tests",
+        config,
+        workspace=tmp_path,
+        request=request,
+        permission_gate=PermissionGate(prompt=approve),
+    )
+
+    assert result.text == "Tests passed."
+    assert prompts == [("run_command", "This tool executes a shell command.")]
+    assert executions == [({"command": "pytest"}, tmp_path.resolve())]
 
 
 def test_agent_preserves_partial_text_when_output_is_truncated(

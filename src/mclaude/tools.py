@@ -1,8 +1,11 @@
 """Tools exposed to the model by the minimal agent."""
 
 import difflib
+import math
 import os
 import re
+import signal
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +17,9 @@ DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000
 DEFAULT_MAX_SEARCH_LINE_CHARS = 500
 DEFAULT_MAX_EDIT_FILE_BYTES = 1_000_000
 DEFAULT_MAX_DIFF_CHARS = 20_000
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
+MAX_COMMAND_TIMEOUT_SECONDS = 600.0
+DEFAULT_MAX_COMMAND_OUTPUT_CHARS = 100_000
 
 READ_FILE_DEFINITION = {
     "name": "read_file",
@@ -116,12 +122,43 @@ REPLACE_TEXT_DEFINITION = {
     },
 }
 
+RUN_COMMAND_DEFINITION = {
+    "name": "run_command",
+    "description": (
+        "Run a shell command inside the workspace and return its exit code, stdout, "
+        "and stderr. Use this to run tests, linters, and other development commands."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "Shell command to run"},
+            "path": {
+                "type": "string",
+                "description": (
+                    "Optional workspace directory in which to run (default: workspace)"
+                ),
+            },
+            "timeout_seconds": {
+                "type": "number",
+                "description": (
+                    "Optional timeout in seconds (default: 120, maximum: 600)"
+                ),
+                "exclusiveMinimum": 0,
+                "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
+            },
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+}
+
 TOOL_DEFINITIONS = [
     READ_FILE_DEFINITION,
     FIND_FILES_DEFINITION,
     SEARCH_TEXT_DEFINITION,
     CREATE_FILE_DEFINITION,
     REPLACE_TEXT_DEFINITION,
+    RUN_COMMAND_DEFINITION,
 ]
 
 
@@ -219,6 +256,46 @@ def _atomic_replace(path: Path, original: bytes, updated: bytes) -> bool:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Best-effort termination for a timed-out shell and its child processes."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        process.kill()
+
+
+def _format_command_output(
+    heading: str,
+    stdout: str,
+    stderr: str,
+    *,
+    max_chars: int,
+) -> str:
+    sections = [heading]
+    if stdout:
+        sections.extend(["stdout:", stdout.rstrip()])
+    if stderr:
+        sections.extend(["stderr:", stderr.rstrip()])
+    if not stdout and not stderr:
+        sections.append("[no output]")
+    content = "\n".join(sections)
+    if len(content) > max_chars:
+        return (
+            f"{content[:max_chars]}\n[Output truncated after {max_chars} characters.]"
+        )
+    return content
 
 
 def read_file(tool_input: object, workspace: Path, *, max_chars: int) -> ToolResult:
@@ -492,3 +569,87 @@ def replace_text(
         max_chars=max_diff_chars,
     )
     return ToolResult(f"Updated {resolved.relative_to(workspace).as_posix()}\n\n{diff}")
+
+
+def run_command(
+    tool_input: object,
+    workspace: Path,
+    *,
+    max_output_chars: int = DEFAULT_MAX_COMMAND_OUTPUT_CHARS,
+) -> ToolResult:
+    """Run a bounded shell command from a directory inside the workspace."""
+    if not isinstance(tool_input, dict):
+        return ToolResult("run_command input must be an object.", is_error=True)
+    command = tool_input.get("command")
+    path_value = tool_input.get("path", ".")
+    timeout = tool_input.get("timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    if not isinstance(command, str) or not command.strip():
+        return ToolResult("run_command requires a non-empty command.", is_error=True)
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ToolResult("run_command path must be a non-empty string.", is_error=True)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > MAX_COMMAND_TIMEOUT_SECONDS
+    ):
+        return ToolResult(
+            f"run_command timeout_seconds must be greater than 0 and at most "
+            f"{MAX_COMMAND_TIMEOUT_SECONDS:g}.",
+            is_error=True,
+        )
+    if not isinstance(max_output_chars, int) or max_output_chars <= 0:
+        raise ValueError("max_output_chars must be positive.")
+
+    workspace = workspace.resolve()
+    working_directory = _resolve_in_workspace(path_value, workspace)
+    if working_directory is None:
+        return ToolResult("Path is outside the workspace.", is_error=True)
+    if not working_directory.exists():
+        return ToolResult(f"Path not found: {path_value}", is_error=True)
+    if not working_directory.is_dir():
+        return ToolResult(f"Path is not a directory: {path_value}", is_error=True)
+
+    process_options: dict[str, object] = {}
+    if os.name == "nt":
+        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=working_directory,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **process_options,
+        )
+    except OSError as exc:
+        return ToolResult(
+            f"Could not start command: {type(exc).__name__}", is_error=True
+        )
+
+    try:
+        stdout, stderr = process.communicate(timeout=float(timeout))
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        stdout, stderr = process.communicate()
+        content = _format_command_output(
+            f"Command timed out after {timeout:g} seconds.",
+            stdout,
+            stderr,
+            max_chars=max_output_chars,
+        )
+        return ToolResult(content, is_error=True)
+
+    content = _format_command_output(
+        f"Exit code: {process.returncode}",
+        stdout,
+        stderr,
+        max_chars=max_output_chars,
+    )
+    return ToolResult(content, is_error=process.returncode != 0)

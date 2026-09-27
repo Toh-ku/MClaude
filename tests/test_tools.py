@@ -1,8 +1,26 @@
 """Tests for the bounded workspace file reader."""
 
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
-from mclaude.tools import create_file, find_files, read_file, replace_text, search_text
+from mclaude.tools import (
+    create_file,
+    find_files,
+    read_file,
+    replace_text,
+    run_command,
+    search_text,
+)
+
+
+def _python_command(code: str) -> str:
+    arguments = [sys.executable, "-c", code]
+    return (
+        subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+    )
 
 
 def test_read_file_reads_utf8_text(tmp_path: Path) -> None:
@@ -230,3 +248,72 @@ def test_file_edit_tools_validate_inputs_and_limits(tmp_path: Path) -> None:
     assert all(result.is_error for result in results)
     assert "edit limit" in results[-1].content
     assert target.read_text(encoding="utf-8") == "abcdef"
+
+
+def test_run_command_captures_output_and_exit_code(tmp_path: Path) -> None:
+    command = _python_command(
+        "import sys; print('standard'); print('problem', file=sys.stderr); "
+        "raise SystemExit(3)"
+    )
+
+    result = run_command({"command": command}, tmp_path)
+
+    assert result.is_error is True
+    assert "Exit code: 3" in result.content
+    assert "stdout:\nstandard" in result.content
+    assert "stderr:\nproblem" in result.content
+
+
+def test_run_command_uses_workspace_subdirectory(tmp_path: Path) -> None:
+    subdirectory = tmp_path / "sub"
+    subdirectory.mkdir()
+
+    result = run_command(
+        {
+            "command": _python_command(
+                "from pathlib import Path; print(Path.cwd().name)"
+            ),
+            "path": "sub",
+        },
+        tmp_path,
+    )
+
+    assert result.is_error is False
+    assert result.content == "Exit code: 0\nstdout:\nsub"
+
+
+def test_run_command_times_out_and_keeps_partial_output(tmp_path: Path) -> None:
+    command = _python_command(
+        "import time; print('started', flush=True); time.sleep(10)"
+    )
+
+    result = run_command(
+        {"command": command, "timeout_seconds": 0.1},
+        tmp_path,
+    )
+
+    assert result.is_error is True
+    assert "timed out after 0.1 seconds" in result.content
+    assert "started" in result.content
+
+
+def test_run_command_validates_scope_timeout_and_output_limit(tmp_path: Path) -> None:
+    results = [
+        run_command([], tmp_path),
+        run_command({}, tmp_path),
+        run_command({"command": "test", "path": "../outside"}, tmp_path),
+        run_command({"command": "test", "timeout_seconds": 0}, tmp_path),
+        run_command({"command": "test", "timeout_seconds": float("nan")}, tmp_path),
+        run_command({"command": "test", "timeout_seconds": 601}, tmp_path),
+    ]
+    bounded = run_command(
+        {"command": _python_command("print('x' * 100)")},
+        tmp_path,
+        max_output_chars=30,
+    )
+
+    assert all(result.is_error for result in results)
+    assert "outside the workspace" in results[2].content
+    assert "at most 600" in results[5].content
+    assert bounded.is_error is False
+    assert bounded.content.endswith("[Output truncated after 30 characters.]")

@@ -25,6 +25,7 @@ from mclaude.tools import (
     find_files,
     read_file,
     replace_text,
+    run_command,
     search_text,
 )
 
@@ -69,6 +70,8 @@ def _execute_tool(
             return create_file(block.input, workspace)
         if block.name == "replace_text":
             return replace_text(block.input, workspace)
+        if block.name == "run_command":
+            return run_command(block.input, workspace)
         return ToolResult(f"Unknown tool: {block.name}", is_error=True)
     return read_file(block.input, workspace, max_chars=max_file_chars)
 

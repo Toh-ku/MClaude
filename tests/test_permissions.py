@@ -17,7 +17,7 @@ def test_default_policy_allows_known_read_only_tools() -> None:
 
 
 def test_default_policy_denies_unknown_tools() -> None:
-    decision = default_permission_policy(PermissionRequest("run_command", {}))
+    decision = default_permission_policy(PermissionRequest("unknown_tool", {}))
 
     assert decision.action is PermissionAction.DENY
     assert "not included" in decision.reason
@@ -29,6 +29,13 @@ def test_default_policy_asks_before_file_edits() -> None:
 
         assert decision.action is PermissionAction.ASK
         assert "modifies workspace files" in decision.reason
+
+
+def test_default_policy_asks_before_commands() -> None:
+    decision = default_permission_policy(PermissionRequest("run_command", {}))
+
+    assert decision.action is PermissionAction.ASK
+    assert "shell command" in decision.reason
 
 
 def test_gate_returns_direct_allow_and_deny_decisions() -> None:

@@ -34,6 +34,7 @@ PermissionPrompt = Callable[[PermissionRequest, str], bool]
 
 READ_ONLY_TOOLS = frozenset({"read_file", "find_files", "search_text"})
 FILE_EDIT_TOOLS = frozenset({"create_file", "replace_text"})
+COMMAND_TOOLS = frozenset({"run_command"})
 
 
 def default_permission_policy(request: PermissionRequest) -> PermissionDecision:
@@ -45,6 +46,10 @@ def default_permission_policy(request: PermissionRequest) -> PermissionDecision:
     if request.tool_name in FILE_EDIT_TOOLS:
         return PermissionDecision(
             PermissionAction.ASK, "This tool modifies workspace files."
+        )
+    if request.tool_name in COMMAND_TOOLS:
+        return PermissionDecision(
+            PermissionAction.ASK, "This tool executes a shell command."
         )
     return PermissionDecision(
         PermissionAction.DENY,
