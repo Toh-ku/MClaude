@@ -118,6 +118,7 @@ def create_message(
     config: ModelConfig,
     *,
     tools: list[dict[str, Any]] | None = None,
+    system: str | None = None,
     on_text: TextCallback | None = None,
 ) -> ModelResponse:
     """Send a message request and normalize the content used by the agent."""
@@ -127,6 +128,7 @@ def create_message(
             "max_tokens": config.max_tokens,
             "messages": messages,
             **({"tools": tools} if tools else {}),
+            **({"system": system} if system else {}),
         }
         if on_text is None:
             with Anthropic(

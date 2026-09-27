@@ -7,6 +7,7 @@ import pytest
 from mclaude.agent import run_agent
 from mclaude.cancellation import TurnCancelled
 from mclaude.config import ModelConfig
+from mclaude.context import load_project_instructions
 from mclaude.permissions import PermissionAction, PermissionDecision, PermissionGate
 from mclaude.provider import ModelError, ModelResponse, TextBlock, ToolUseBlock
 from mclaude.tools import ToolResult
@@ -81,6 +82,30 @@ def test_agent_reads_file_and_returns_final_answer(
             }
         ],
     }
+
+
+def test_agent_sends_scoped_project_instructions(
+    tmp_path: Path, config: ModelConfig
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("Always test changes.", encoding="utf-8")
+    received = {}
+
+    def request(messages, request_config, *, tools, system):
+        received["system"] = system
+        return ModelResponse(content=(TextBlock("Done"),), stop_reason="end_turn")
+
+    instructions = load_project_instructions(tmp_path)
+    result = run_agent(
+        "Work",
+        config,
+        workspace=tmp_path,
+        project_instructions=instructions,
+        request=request,
+    )
+
+    assert result.text == "Done"
+    assert "Always test changes." in received["system"]
+    assert "source='AGENTS.md'" in received["system"]
 
 
 def test_multiple_tool_calls_execute_in_order_and_return_failures(

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
+from mclaude.context import ContextError, load_project_instructions
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
@@ -152,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run an interactive conversation without saving it",
     )
+    parser.add_argument(
+        "--show-instructions",
+        action="store_true",
+        help="Show project instruction sources for the current workspace and exit",
+    )
     parser.add_argument("--model", help="Model ID (overrides ANTHROPIC_MODEL)")
     parser.add_argument(
         "--max-tokens",
@@ -172,6 +178,19 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Maximum model requests per turn (default: {DEFAULT_MAX_ITERATIONS})",
     )
     args = parser.parse_args(argv)
+    if args.show_instructions:
+        try:
+            instructions = load_project_instructions(Path.cwd())
+        except ContextError as exc:
+            parser.error(str(exc))
+        if not instructions.sources:
+            print("No project instruction files apply to this workspace.")
+        else:
+            for source in instructions.sources:
+                relative = source.path.relative_to(instructions.workspace)
+                scope = source.scope.relative_to(instructions.workspace)
+                print(f"{relative} (scope: {scope or Path('.')})")
+        return 0
     if args.no_persist and (args.continue_session or args.resume):
         parser.error("--no-persist cannot be combined with --continue or --resume.")
     interactive = (

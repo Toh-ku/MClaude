@@ -7,6 +7,7 @@ from typing import Any
 
 from mclaude.cancellation import TurnCancelled, protect_cleanup
 from mclaude.config import ModelConfig
+from mclaude.context import ProjectInstructions, load_project_instructions
 from mclaude.permissions import (
     PermissionAction,
     PermissionGate,
@@ -91,6 +92,7 @@ def run_agent(
     history: list[dict[str, Any]] | None = None,
     on_text: TextCallback | None = None,
     on_history_event: HistoryEvent | None = None,
+    project_instructions: ProjectInstructions | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -105,6 +107,8 @@ def run_agent(
         raise ValueError("max_file_chars must be positive.")
 
     workspace = (workspace or Path.cwd()).resolve()
+    project_instructions = project_instructions or load_project_instructions(workspace)
+    system_prompt = project_instructions.system_prompt()
     request = request or create_message
     permission_gate = permission_gate or PermissionGate()
     messages = history if history is not None else []
@@ -126,6 +130,7 @@ def run_agent(
                 messages,
                 config,
                 tools=TOOL_DEFINITIONS,
+                **({"system": system_prompt} if system_prompt else {}),
                 **({"on_text": emit_text} if on_text is not None else {}),
             )
         except (ModelError, KeyboardInterrupt):

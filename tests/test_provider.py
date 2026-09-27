@@ -183,6 +183,15 @@ def test_tool_request_is_sent_and_normalized(api):
     assert json.loads(api["requests"][0].content)["tools"] == tools
 
 
+def test_system_prompt_is_sent(api):
+    provider.create_message(
+        [{"role": "user", "content": "Hello"}],
+        ModelConfig(api_key="test-secret", model="test-model"),
+        system="Follow AGENTS.md",
+    )
+    assert json.loads(api["requests"][0].content)["system"] == "Follow AGENTS.md"
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
