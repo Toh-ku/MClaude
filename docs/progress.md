@@ -23,4 +23,16 @@
 - 验证结果：`uv run ruff format --check .`、`uv run ruff check .` 全部通过；`uv run pytest` 的 34 项测试全部通过。使用模拟 HTTP 传输验证真实 SDK 的请求格式、中文输入、文本块拼接、配置优先级、错误处理和截断行为。
 - 验收限制：当前环境没有配置 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_MODEL`，未执行真实模型调用；需按 README 本地配置后完成真实 API 验收。
 
-下一步：03 `feat: add minimal agent loop`，引入消息历史、工具调用与结果回传，首先提供受工作目录边界限制的 `read_file` 工具。
+## 03 — 最小 Agent 循环
+
+- 日期：2026-09-27
+- 新增 Agent 循环，在单次任务中保留用户消息、模型内容块、工具调用与工具结果，直到模型正常回答。
+- 接入 Anthropic 结构化工具调用，当前仅提供 `read_file`；同一模型响应中的多个调用按出现顺序执行，并按调用 ID 一次性回传。
+- `read_file` 仅允许读取当前工作目录内的 UTF-8 普通文件；拒绝目录穿越与工作区外路径，缺失文件、非法参数和读取失败作为工具错误返回模型。
+- 单个文件结果限制为 100,000 字符，默认最多发起 8 次模型请求；文件截断会写入结果标记，循环耗尽会明确失败。
+- 区分正常结束、模型输出截断、异常停止、空响应、请求失败和循环超限；模型输出截断时保留已有文本并返回非零退出码。
+- CLI 新增 `--max-iterations`，README 更新为 Agent 用法和边界说明。
+- 验证结果：`uv run ruff format --check .`、`uv run ruff check .` 和 `uv run pytest` 全部通过，共 49 项测试。
+- 验收限制：自动化测试已覆盖完整工具闭环；真实 API 调用仍需有效的 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_MODEL`。
+
+下一步：04 `feat: add workspace search`，增加文件发现和文本搜索，并尊重项目忽略规则。

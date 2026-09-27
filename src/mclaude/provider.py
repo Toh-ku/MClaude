@@ -1,6 +1,7 @@
-"""Single-turn text requests through the Anthropic Messages API."""
+"""Anthropic Messages API access and response normalization."""
 
 from dataclasses import dataclass
+from typing import Any
 
 from anthropic import (
     Anthropic,
@@ -23,10 +24,34 @@ class TextResponse:
     truncated: bool
 
 
-def complete(prompt: str, config: ModelConfig) -> TextResponse:
-    """Send one request, with no tools, streaming, or automatic retries."""
-    if not prompt.strip():
-        raise ModelError("The prompt must not be empty.")
+@dataclass(frozen=True)
+class TextBlock:
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolUseBlock:
+    id: str
+    name: str
+    input: object
+
+
+ContentBlock = TextBlock | ToolUseBlock
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    content: tuple[ContentBlock, ...]
+    stop_reason: str | None
+
+
+def create_message(
+    messages: list[dict[str, Any]],
+    config: ModelConfig,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+) -> ModelResponse:
+    """Send a message request and normalize the content used by the agent."""
     try:
         with Anthropic(
             api_key=config.api_key,
@@ -36,7 +61,8 @@ def complete(prompt: str, config: ModelConfig) -> TextResponse:
             message = client.messages.create(
                 model=config.model,
                 max_tokens=config.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
+                **({"tools": tools} if tools else {}),
             )
     except APITimeoutError as exc:
         raise ModelError("Request timed out; try again or increase --timeout.") from exc
@@ -63,9 +89,28 @@ def complete(prompt: str, config: ModelConfig) -> TextResponse:
     except APIError as exc:
         raise ModelError("The API returned an invalid response.") from exc
 
+    content: list[ContentBlock] = []
+    for block in message.content:
+        if block.type == "text":
+            content.append(TextBlock(text=block.text))
+        elif block.type == "tool_use":
+            content.append(
+                ToolUseBlock(id=block.id, name=block.name, input=block.input)
+            )
+    return ModelResponse(content=tuple(content), stop_reason=message.stop_reason)
+
+
+def complete(prompt: str, config: ModelConfig) -> TextResponse:
+    """Send one text-only request, retained as a small public convenience API."""
+    if not prompt.strip():
+        raise ModelError("The prompt must not be empty.")
+    message = create_message([{"role": "user", "content": prompt}], config)
+
     if message.stop_reason not in {"end_turn", "max_tokens"}:
         raise ModelError("The model did not finish a text response.")
-    text = "\n".join(block.text for block in message.content if block.type == "text")
+    text = "\n".join(
+        block.text for block in message.content if isinstance(block, TextBlock)
+    )
     if not text.strip():
         raise ModelError("The model returned no text.")
     return TextResponse(text=text, truncated=message.stop_reason == "max_tokens")

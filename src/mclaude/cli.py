@@ -4,8 +4,9 @@ import argparse
 import sys
 from importlib.metadata import version
 
+from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
-from mclaude.provider import ModelError, complete
+from mclaude.provider import ModelError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -13,7 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mclaude",
         description="MClaude: a Python coding agent built incrementally.",
-        epilog="Set ANTHROPIC_API_KEY and ANTHROPIC_MODEL to send a text request.",
+        epilog="Set ANTHROPIC_API_KEY and ANTHROPIC_MODEL to run the agent.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
@@ -32,12 +33,20 @@ def main(argv: list[str] | None = None) -> int:
         default=60.0,
         help="Request timeout in seconds (default: 60)",
     )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=DEFAULT_MAX_ITERATIONS,
+        help=f"Maximum model requests (default: {DEFAULT_MAX_ITERATIONS})",
+    )
     args = parser.parse_args(argv)
     if args.prompt is None:
         parser.print_help()
         return 0
     if not args.prompt.strip():
         parser.error("The prompt must not be empty.")
+    if args.max_iterations <= 0:
+        parser.error("--max-iterations must be a positive integer.")
     try:
         config = ModelConfig.from_env(
             model=args.model, max_tokens=args.max_tokens, timeout=args.timeout
@@ -45,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigurationError as exc:
         parser.error(str(exc))
     try:
-        response = complete(args.prompt, config)
+        response = run_agent(args.prompt, config, max_iterations=args.max_iterations)
     except ModelError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

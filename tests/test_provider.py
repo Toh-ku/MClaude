@@ -68,6 +68,41 @@ def test_request_and_multiple_text_blocks(api, monkeypatch):
     assert api["client"].is_closed()
 
 
+def test_tool_request_is_sent_and_normalized(api):
+    api["body"]["content"] = [
+        {"type": "text", "text": "Reading"},
+        {
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        },
+    ]
+    api["body"]["stop_reason"] = "tool_use"
+    tools = [
+        {
+            "name": "read_file",
+            "description": "Read a file",
+            "input_schema": {"type": "object"},
+        }
+    ]
+
+    response = provider.create_message(
+        [{"role": "user", "content": "Read the README"}],
+        ModelConfig(api_key="test-secret", model="test-model"),
+        tools=tools,
+    )
+
+    assert response == provider.ModelResponse(
+        content=(
+            provider.TextBlock("Reading"),
+            provider.ToolUseBlock("tool-1", "read_file", {"path": "README.md"}),
+        ),
+        stop_reason="tool_use",
+    )
+    assert json.loads(api["requests"][0].content)["tools"] == tools
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [

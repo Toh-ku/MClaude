@@ -47,7 +47,7 @@ def test_invalid_cli_values_never_call_model(args, monkeypatch, capsys):
     def unexpected_call(*args, **kwargs):
         pytest.fail("Invalid input must not reach the model")
 
-    monkeypatch.setattr(cli, "complete", unexpected_call)
+    monkeypatch.setattr(cli, "run_agent", unexpected_call)
     with pytest.raises(SystemExit) as error:
         cli.main(args)
     assert error.value.code == 2

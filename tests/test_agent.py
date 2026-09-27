@@ -1,0 +1,157 @@
+"""Tests for message history and the minimal agent loop."""
+
+from pathlib import Path
+
+import pytest
+
+from mclaude.agent import run_agent
+from mclaude.config import ModelConfig
+from mclaude.provider import ModelError, ModelResponse, TextBlock, ToolUseBlock
+
+
+@pytest.fixture
+def config() -> ModelConfig:
+    return ModelConfig(api_key="test-secret", model="test-model")
+
+
+def test_agent_reads_file_and_returns_final_answer(
+    tmp_path: Path, config: ModelConfig
+) -> None:
+    (tmp_path / "notes.txt").write_text("important content", encoding="utf-8")
+    calls = []
+    responses = iter(
+        [
+            ModelResponse(
+                content=(
+                    TextBlock("I will inspect it."),
+                    ToolUseBlock("tool-1", "read_file", {"path": "notes.txt"}),
+                ),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(
+                content=(TextBlock("The file contains important content."),),
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+
+    def request(messages, request_config, *, tools):
+        calls.append((messages.copy(), request_config, tools))
+        return next(responses)
+
+    result = run_agent(
+        "Summarize notes.txt", config, workspace=tmp_path, request=request
+    )
+
+    assert result.text == "The file contains important content."
+    assert result.truncated is False
+    assert len(calls) == 2
+    assert calls[0][0] == [{"role": "user", "content": "Summarize notes.txt"}]
+    assert calls[0][2][0]["name"] == "read_file"
+    assert calls[1][0][1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "I will inspect it."},
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "read_file",
+                "input": {"path": "notes.txt"},
+            },
+        ],
+    }
+    assert calls[1][0][2] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": "important content",
+                "is_error": False,
+            }
+        ],
+    }
+
+
+def test_multiple_tool_calls_execute_in_order_and_return_failures(
+    tmp_path: Path, config: ModelConfig
+) -> None:
+    (tmp_path / "first.txt").write_text("first", encoding="utf-8")
+    seen_messages = []
+    responses = iter(
+        [
+            ModelResponse(
+                content=(
+                    ToolUseBlock("a", "read_file", {"path": "first.txt"}),
+                    ToolUseBlock("b", "read_file", {"path": "missing.txt"}),
+                ),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(content=(TextBlock("Done"),), stop_reason="end_turn"),
+        ]
+    )
+
+    def request(messages, request_config, *, tools):
+        seen_messages.append(messages.copy())
+        return next(responses)
+
+    assert (
+        run_agent("Read both", config, workspace=tmp_path, request=request).text
+        == "Done"
+    )
+    results = seen_messages[1][-1]["content"]
+    assert [result["tool_use_id"] for result in results] == ["a", "b"]
+    assert results[0]["content"] == "first"
+    assert results[0]["is_error"] is False
+    assert "not found" in results[1]["content"]
+    assert results[1]["is_error"] is True
+
+
+def test_agent_preserves_partial_text_when_output_is_truncated(
+    config: ModelConfig,
+) -> None:
+    response = ModelResponse(
+        content=(TextBlock("partial answer"),), stop_reason="max_tokens"
+    )
+
+    result = run_agent("Question", config, request=lambda *args, **kwargs: response)
+
+    assert result.text == "partial answer"
+    assert result.truncated is True
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        (ModelResponse(content=(), stop_reason="end_turn"), "no text"),
+        (ModelResponse(content=(), stop_reason="max_tokens"), "truncated"),
+        (ModelResponse(content=(), stop_reason="tool_use"), "without a tool call"),
+        (ModelResponse(content=(), stop_reason="refusal"), "unexpectedly"),
+        (
+            ModelResponse(
+                content=(ToolUseBlock("a", "read_file", {"path": "x"}),),
+                stop_reason="end_turn",
+            ),
+            "ended while requesting",
+        ),
+    ],
+)
+def test_agent_rejects_invalid_stops(
+    config: ModelConfig, response: ModelResponse, error: str
+) -> None:
+    with pytest.raises(ModelError, match=error):
+        run_agent("Question", config, request=lambda *args, **kwargs: response)
+
+
+def test_agent_enforces_iteration_limit(config: ModelConfig) -> None:
+    response = ModelResponse(
+        content=(ToolUseBlock("a", "unknown", {}),), stop_reason="tool_use"
+    )
+
+    with pytest.raises(ModelError, match="maximum of 2"):
+        run_agent(
+            "Question",
+            config,
+            max_iterations=2,
+            request=lambda *args, **kwargs: response,
+        )
