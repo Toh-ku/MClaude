@@ -55,6 +55,7 @@ DEFAULT_MAX_FILE_CHARS = 100_000
 
 ModelRequest = Callable[..., ModelResponse]
 HistoryEvent = Callable[[str, dict[str, Any]], None]
+StatusEvent = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ def run_agent(
     history: list[dict[str, Any]] | None = None,
     on_text: TextCallback | None = None,
     on_history_event: HistoryEvent | None = None,
+    on_status_event: StatusEvent | None = None,
     project_instructions: ProjectInstructions | None = None,
     context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     checkpoint_store: CheckpointStore | None = None,
@@ -188,7 +190,7 @@ def run_agent(
     if on_history_event is not None:
         on_history_event("message", user_message)
 
-    for _ in range(max_iterations):
+    for iteration in range(1, max_iterations + 1):
         system_prompt = base_system_prompt
         if task_board.tasks:
             system_prompt += "\nCurrent task state:\n" + task_board.render()
@@ -201,7 +203,7 @@ def run_agent(
 
         try:
             try:
-                context_budget.ensure_fits(
+                context_tokens = context_budget.ensure_fits(
                     messages, tools=tool_definitions, system=system_prompt
                 )
             except ContextBudgetExceeded as exc:
@@ -216,6 +218,23 @@ def run_agent(
                 messages[:] = compacted
                 if on_history_event is not None:
                     on_history_event("compaction", {"history": messages.copy()})
+                context_tokens = context_budget.ensure_fits(
+                    messages, tools=tool_definitions, system=system_prompt
+                )
+                if on_status_event is not None:
+                    on_status_event(
+                        "context.compacted", {"context_tokens": context_tokens}
+                    )
+            if on_status_event is not None:
+                on_status_event(
+                    "request.started",
+                    {
+                        "iteration": iteration,
+                        "max_iterations": max_iterations,
+                        "context_tokens": context_tokens,
+                        "output_tokens": config.max_tokens,
+                    },
+                )
             response = request(
                 messages,
                 config,
@@ -223,6 +242,15 @@ def run_agent(
                 **({"system": system_prompt} if system_prompt else {}),
                 **({"on_text": emit_text} if on_text is not None else {}),
             )
+            if on_status_event is not None:
+                on_status_event(
+                    "response.received",
+                    {
+                        "stop_reason": response.stop_reason or "unknown",
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                    },
+                )
         except (ModelError, KeyboardInterrupt):
             with protect_cleanup():
                 partial_text = "".join(chunks)
@@ -295,6 +323,14 @@ def run_agent(
         result_message = {"role": "user", "content": results}
         scheduler = ToolScheduler(read_workers, enabled=hooks is None or planning)
         call_order = {call.id: index for index, call in enumerate(tool_calls)}
+        if on_status_event is not None:
+            on_status_event(
+                "tools.started",
+                {
+                    "count": len(tool_calls),
+                    "names": [call.name for call in tool_calls],
+                },
+            )
 
         def prepare(call: ToolUseBlock) -> ToolResult | None:
             if allowed_tools is not None and call.name not in allowed_tools:
@@ -399,6 +435,11 @@ def run_agent(
             with protect_cleanup():
                 if on_history_event is not None:
                     on_history_event("tool_result", result_block)
+                if on_status_event is not None:
+                    on_status_event(
+                        "tool.finished",
+                        {"name": call.name, "is_error": result_block["is_error"]},
+                    )
                 results.append(result_block)
                 results.sort(key=lambda item: call_order[item["tool_use_id"]])
 

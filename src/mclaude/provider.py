@@ -50,6 +50,8 @@ ContentBlock = TextBlock | ToolUseBlock
 class ModelResponse:
     content: tuple[ContentBlock, ...]
     stop_reason: str | None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 async def _consume_stream(stream: Any, on_text: TextCallback) -> Any:
@@ -202,7 +204,13 @@ def create_message(
             content.append(
                 ToolUseBlock(id=block.id, name=block.name, input=block.input)
             )
-    return ModelResponse(content=tuple(content), stop_reason=message.stop_reason)
+    usage = getattr(message, "usage", None)
+    return ModelResponse(
+        content=tuple(content),
+        stop_reason=message.stop_reason,
+        input_tokens=getattr(usage, "input_tokens", None),
+        output_tokens=getattr(usage, "output_tokens", None),
+    )
 
 
 def complete(prompt: str, config: ModelConfig) -> TextResponse:

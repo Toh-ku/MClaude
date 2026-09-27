@@ -186,6 +186,8 @@ def test_tool_request_is_sent_and_normalized(api):
             provider.ToolUseBlock("tool-1", "read_file", {"path": "README.md"}),
         ),
         stop_reason="tool_use",
+        input_tokens=3,
+        output_tokens=5,
     )
     assert json.loads(api["requests"][0].content)["tools"] == tools
 

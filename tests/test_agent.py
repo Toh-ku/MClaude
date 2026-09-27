@@ -528,6 +528,36 @@ def test_conversations_are_independent_and_budget_resets(config: ModelConfig):
     assert calls[2] == [{"role": "user", "content": "Separate"}]
 
 
+def test_agent_reports_request_context_and_api_token_usage(config: ModelConfig):
+    events = []
+
+    response = ModelResponse(
+        (TextBlock("Answer"),),
+        "end_turn",
+        input_tokens=321,
+        output_tokens=12,
+    )
+    run_agent(
+        "Question",
+        config,
+        request=lambda *args, **kwargs: response,
+        on_status_event=lambda kind, payload: events.append((kind, payload)),
+    )
+
+    assert events[0][0] == "request.started"
+    assert events[0][1]["iteration"] == 1
+    assert events[0][1]["context_tokens"] > 0
+    assert events[0][1]["output_tokens"] == config.max_tokens
+    assert events[1] == (
+        "response.received",
+        {
+            "stop_reason": "end_turn",
+            "input_tokens": 321,
+            "output_tokens": 12,
+        },
+    )
+
+
 @pytest.mark.parametrize("during_permission", [False, True])
 def test_cancelled_tool_batch_keeps_results_and_skips_remaining_calls(
     config, tmp_path, monkeypatch, during_permission

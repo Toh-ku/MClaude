@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import time
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
 from mclaude.skills import SkillCatalog
 from mclaude.tasks import TaskBoard
+from mclaude.terminal import TerminalStatus, supports_status_view
 
 
 def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
@@ -51,21 +53,29 @@ def _run_conversation(
     mcp: MCPRegistry | None = None,
     subagent_budget: int = 8,
     read_workers: int = 4,
+    terminal_status: TerminalStatus | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
+    if terminal_status is not None:
+        terminal_status.history = history
     task_board = session.task_board if session is not None else TaskBoard()
     workspace = Path.cwd()
     permission_gate = PermissionGate(prompt=_prompt_tool_permission)
     exit_code = 0
+    turn_number = 0
     if interactive:
         print(
             "Interactive conversation. Enter /exit or /quit to leave; "
             "Ctrl+C cancels the current turn; at the input prompt it exits.",
             file=sys.stderr,
         )
+        if terminal_status is not None:
+            terminal_status.ready()
 
     def record_history_event(event_type: str, payload: dict[str, Any]) -> None:
+        if event_type == "tasks" and terminal_status is not None:
+            terminal_status.update_tasks(payload["tasks"])
         if session is None:
             return
         if event_type == "message":
@@ -94,6 +104,8 @@ def _run_conversation(
                 continue
             if prompt.strip().casefold() == "/tasks":
                 print(task_board.render())
+                if terminal_status is not None:
+                    terminal_status.event("tasks", "displayed current task board")
                 prompt = None
                 continue
             if prompt.strip().casefold() in {"/plan", "/execute"}:
@@ -103,9 +115,15 @@ def _run_conversation(
                 print(
                     f"Mode: {'planning' if planning else 'execution'}", file=sys.stderr
                 )
+                if terminal_status is not None:
+                    terminal_status.set_mode(planning)
                 prompt = None
                 continue
         streamed = False
+        turn_number += 1
+        turn_started = time.monotonic()
+        if terminal_status is not None:
+            terminal_status.event("turn", f"{turn_number} started")
 
         def display_text(text: str) -> None:
             nonlocal streamed
@@ -128,7 +146,14 @@ def _run_conversation(
                 subagent_budget=subagent_budget,
                 read_workers=read_workers,
                 on_text=display_text,
-                on_history_event=record_history_event if session is not None else None,
+                on_history_event=(
+                    record_history_event
+                    if session is not None or terminal_status is not None
+                    else None
+                ),
+                on_status_event=(
+                    terminal_status.agent_event if terminal_status is not None else None
+                ),
             )
         except KeyboardInterrupt:
             if session is not None:
@@ -138,11 +163,20 @@ def _run_conversation(
             print(
                 "\nTurn cancelled. You can continue the conversation.", file=sys.stderr
             )
+            if terminal_status is not None:
+                duration = time.monotonic() - turn_started
+                terminal_status.event(
+                    "cancelled", f"turn {turn_number} after {duration:.1f}s"
+                )
         except ModelError as exc:
             if session is not None:
                 session.record_turn("error")
             print(f"Error: {exc}", file=sys.stderr)
             exit_code = 1
+            if terminal_status is not None:
+                duration = time.monotonic() - turn_started
+                detail = f"turn {turn_number} after {duration:.1f}s"
+                terminal_status.event("error", detail)
         else:
             if not streamed:
                 print(response.text, flush=True)
@@ -153,8 +187,16 @@ def _run_conversation(
                 exit_code = 1
             if session is not None:
                 session.record_turn("truncated" if response.truncated else "ok")
+            if terminal_status is not None:
+                result = "truncated" if response.truncated else "completed"
+                terminal_status.event(
+                    result,
+                    f"turn {turn_number} in {time.monotonic() - turn_started:.1f}s",
+                )
         if not interactive:
             return exit_code
+        if terminal_status is not None:
+            terminal_status.ready()
         prompt = None
 
 
@@ -215,6 +257,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-persist",
         action="store_true",
         help="Run an interactive conversation without saving it",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable the interactive terminal status page",
     )
     parser.add_argument(
         "--show-instructions",
@@ -315,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigurationError as exc:
         parser.error(str(exc))
     session: Session | None = None
+    session_kind = "temporary"
+    terminal_status: TerminalStatus | None = None
+    recovery_warning: str | None = None
     try:
         hooks = HookRunner.from_file(args.hooks) if args.hooks else None
         mcp = (
@@ -330,18 +380,47 @@ def main(argv: list[str] | None = None) -> int:
             workspace = Path.cwd()
             if args.resume is not None:
                 session = store.resume(args.resume, workspace)
-                print(f"Resumed session: {session.id}", file=sys.stderr)
+                session_kind = "resumed"
             elif args.continue_session:
                 session = store.continue_latest(workspace)
-                print(f"Resumed session: {session.id}", file=sys.stderr)
+                session_kind = "resumed"
             else:
                 session = store.create(workspace, config.model)
-                print(f"Session: {session.id}", file=sys.stderr)
-            if session.recovery_warning:
+                session_kind = "new"
+            status_enabled = not args.plain and supports_status_view()
+            if not status_enabled:
+                label = "Resumed session" if session_kind == "resumed" else "Session"
+                print(f"{label}: {session.id}", file=sys.stderr)
+            recovery_warning = session.recovery_warning
+        elif interactive:
+            status_enabled = not args.plain and supports_status_view()
+        else:
+            status_enabled = False
+        if interactive:
+            terminal_status = TerminalStatus(
+                enabled=status_enabled,
+                workspace=Path.cwd().resolve(),
+                model=config.model,
+                session_id=session.id if session is not None else None,
+                session_kind=session_kind,
+                planning=args.plan,
+                context_budget=args.context_budget,
+                max_tokens=config.max_tokens,
+                history=session.history if session is not None else [],
+                version=version("mclaude"),
+                hooks_enabled=hooks is not None,
+                mcp_enabled=mcp is not None,
+                subagent_budget=args.subagent_budget,
+                read_workers=args.read_workers,
+                tasks=session.task_board.tasks if session is not None else [],
+            )
+            terminal_status.open()
+            if recovery_warning:
                 print(
-                    f"Session recovery warning: {session.recovery_warning}",
+                    f"Session recovery warning: {recovery_warning}",
                     file=sys.stderr,
                 )
+                terminal_status.event("warning", "session recovery was required")
         try:
             return _run_conversation(
                 args.prompt,
@@ -355,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
                 mcp=mcp,
                 subagent_budget=args.subagent_budget,
                 read_workers=args.read_workers,
+                terminal_status=terminal_status,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)
