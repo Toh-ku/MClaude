@@ -210,3 +210,26 @@ def test_log_does_not_store_credentials(tmp_path: Path) -> None:
     assert records[0]["model"] == "test-model"
     assert "api_key" not in records[0]
     session.close()
+
+
+def test_compacted_history_round_trip_replaces_older_messages(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace, "test-model")
+    session_id = session.id
+    session.record_message({"role": "user", "content": "old detail"})
+    compacted = [
+        {"role": "user", "content": "Compacted context"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Summary of old detail"}],
+        },
+        {"role": "user", "content": "recent request"},
+    ]
+    session.record_compaction(compacted)
+    session.close()
+
+    resumed = store.resume(session_id, workspace)
+    assert resumed.history == compacted
+    resumed.close()

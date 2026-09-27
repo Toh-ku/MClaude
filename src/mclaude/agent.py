@@ -12,6 +12,7 @@ from mclaude.context import (
     ContextBudget,
     ContextBudgetExceeded,
     ProjectInstructions,
+    compact_history,
     load_project_instructions,
 )
 from mclaude.permissions import (
@@ -142,7 +143,17 @@ def run_agent(
                     messages, tools=TOOL_DEFINITIONS, system=system_prompt
                 )
             except ContextBudgetExceeded as exc:
-                raise ModelError(str(exc)) from exc
+                compacted = compact_history(
+                    messages,
+                    context_budget,
+                    tools=TOOL_DEFINITIONS,
+                    system=system_prompt,
+                )
+                if compacted is None:
+                    raise ModelError(str(exc)) from exc
+                messages[:] = compacted
+                if on_history_event is not None:
+                    on_history_event("compaction", {"history": messages.copy()})
             response = request(
                 messages,
                 config,
@@ -264,15 +275,12 @@ def run_agent(
                         },
                     ]
 
-                try:
-                    fitted_content, budget_truncated = context_budget.fit_tool_result(
-                        original_content,
-                        build_messages,
-                        tools=TOOL_DEFINITIONS,
-                        system=system_prompt,
-                    )
-                except ContextBudgetExceeded as exc:
-                    raise ModelError(str(exc)) from exc
+                fitted_content, budget_truncated = context_budget.fit_tool_result(
+                    original_content,
+                    build_messages,
+                    tools=TOOL_DEFINITIONS,
+                    system=system_prompt,
+                )
                 result_block = {
                     "type": "tool_result",
                     "tool_use_id": call.id,

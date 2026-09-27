@@ -10,6 +10,7 @@ INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md")
 MAX_INSTRUCTION_FILE_CHARS = 100_000
 DEFAULT_CONTEXT_BUDGET_TOKENS = 100_000
 TOOL_TRUNCATION_MARKER = "\n...[tool result truncated to fit context budget]"
+SUMMARY_PREFIX = "Earlier conversation summary (generated locally):"
 
 
 class ContextError(RuntimeError):
@@ -147,12 +148,121 @@ class ContextBudget:
         candidate = content[:low] + TOOL_TRUNCATION_MARKER
         if not fits(candidate):
             candidate = "Tool result omitted: context budget exhausted."
-            if not fits(candidate):
-                raise ContextBudgetExceeded(
-                    "The tool call and its minimal result exceed the configured "
-                    "context budget."
-                )
         return candidate, True
+
+
+def _message_groups(
+    messages: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group tool calls with the immediately following result message."""
+    groups: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        group = [message]
+        content = message.get("content")
+        tool_ids = {
+            block.get("id")
+            for block in content
+            if isinstance(content, list)
+            and isinstance(block, dict)
+            and block.get("type") == "tool_use"
+        }
+        if tool_ids and index + 1 < len(messages):
+            following = messages[index + 1]
+            following_content = following.get("content")
+            result_ids = {
+                block.get("tool_use_id")
+                for block in following_content
+                if isinstance(following_content, list)
+                and isinstance(block, dict)
+                and block.get("type") == "tool_result"
+            }
+            if result_ids == tool_ids:
+                group.append(following)
+                index += 1
+        groups.append(group)
+        index += 1
+    return groups
+
+
+def _clip(value: str, limit: int = 500) -> str:
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[: limit - 3] + "..."
+
+
+def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
+    lines: list[str] = []
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content")
+        if isinstance(content, str):
+            lines.append(f"{role.title()}: {_clip(content)}")
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                lines.append(f"{role.title()}: {_clip(str(block.get('text', '')))}")
+            elif block.get("type") == "tool_use":
+                arguments = json.dumps(
+                    block.get("input"), ensure_ascii=False, separators=(",", ":")
+                )
+                lines.append(
+                    f"Tool call {block.get('name')} ({block.get('id')}): "
+                    f"{_clip(arguments)}"
+                )
+            elif block.get("type") == "tool_result":
+                status = "error" if block.get("is_error") else "ok"
+                lines.append(
+                    f"Tool result {block.get('tool_use_id')} [{status}]: "
+                    f"{_clip(str(block.get('content', '')))}"
+                )
+    summary = "\n".join(lines)
+    if len(summary) > limit:
+        summary = summary[: max(0, limit - 30)] + "\n...[summary shortened]"
+    return summary
+
+
+def compact_history(
+    messages: list[dict[str, Any]],
+    budget: ContextBudget,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    system: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """Replace the oldest complete groups with a bounded local summary."""
+    groups = _message_groups(messages)
+    if len(groups) < 2:
+        return None
+    for summary_limit in (4_000, 2_000, 1_000, 500, 200):
+        for cut in range(1, len(groups)):
+            removed = [message for group in groups[:cut] for message in group]
+            retained = [message for group in groups[cut:] for message in group]
+            summary = _summarize_messages(removed, summary_limit)
+            candidate = [
+                {
+                    "role": "user",
+                    "content": (
+                        "Use this compacted context for the earlier conversation."
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": f"{SUMMARY_PREFIX}\n{summary}"}
+                    ],
+                },
+                *retained,
+            ]
+            try:
+                budget.ensure_fits(candidate, tools=tools, system=system)
+            except ContextBudgetExceeded:
+                continue
+            return candidate
+    return None
 
 
 def load_project_instructions(

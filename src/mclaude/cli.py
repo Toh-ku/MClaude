@@ -62,6 +62,8 @@ def _run_conversation(
             session.record_message(payload)
         elif event_type == "tool_result":
             session.record_tool_result(payload)
+        elif event_type == "compaction":
+            session.record_compaction(payload["history"])
         else:
             raise SessionError(f"Unsupported history event: {event_type}")
 

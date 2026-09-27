@@ -147,6 +147,38 @@ def test_agent_truncates_tool_result_to_context_budget(
     assert len(tool_result["content"]) < 20_000
 
 
+def test_agent_compacts_old_history_before_request(
+    tmp_path: Path, config: ModelConfig
+) -> None:
+    history = [
+        {"role": "user", "content": "Original objective " * 200},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Earlier answer " * 200}],
+        },
+        {"role": "user", "content": "Recent constraint"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Noted"}]},
+    ]
+    events = []
+
+    def request(messages, request_config, *, tools):
+        assert messages[0]["content"].startswith("Use this compacted context")
+        assert "Original objective" in messages[1]["content"][0]["text"]
+        return ModelResponse(content=(TextBlock("Done"),), stop_reason="end_turn")
+
+    response = run_agent(
+        "Continue",
+        ModelConfig(api_key=config.api_key, model=config.model, max_tokens=50),
+        workspace=tmp_path,
+        history=history,
+        request=request,
+        context_budget_tokens=1_500,
+        on_history_event=lambda kind, payload: events.append((kind, payload)),
+    )
+    assert response.text == "Done"
+    assert any(kind == "compaction" for kind, _ in events)
+
+
 def test_multiple_tool_calls_execute_in_order_and_return_failures(
     tmp_path: Path, config: ModelConfig
 ) -> None:

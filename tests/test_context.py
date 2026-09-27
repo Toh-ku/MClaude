@@ -9,6 +9,7 @@ from mclaude.context import (
     ContextBudget,
     ContextBudgetExceeded,
     ContextError,
+    compact_history,
     load_project_instructions,
 )
 
@@ -92,3 +93,49 @@ def test_context_budget_truncates_tool_result_to_fit() -> None:
     assert content.endswith(TOOL_TRUNCATION_MARKER)
     assert len(content) < 1000
     budget.ensure_fits(build(content))
+
+
+def test_compaction_preserves_recent_tool_pair_and_summarizes_goal() -> None:
+    history = [
+        {"role": "user", "content": "Implement the important objective " * 80},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I will inspect the code."}],
+        },
+        {"role": "user", "content": "Keep compatibility." * 80},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "read-1",
+                    "name": "read_file",
+                    "input": {"path": "src/app.py"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "read-1",
+                    "content": "recent result",
+                    "is_error": False,
+                }
+            ],
+        },
+        {"role": "user", "content": "Continue now"},
+    ]
+    budget = ContextBudget(max_tokens=850, output_tokens=50)
+    compacted = compact_history(history, budget)
+    assert compacted is not None
+    assert "important objective" in compacted[1]["content"][0]["text"]
+    call_index = next(
+        index
+        for index, message in enumerate(compacted)
+        if isinstance(message["content"], list)
+        and any(block.get("type") == "tool_use" for block in message["content"])
+    )
+    assert compacted[call_index + 1]["content"][0]["tool_use_id"] == "read-1"
+    budget.ensure_fits(compacted)

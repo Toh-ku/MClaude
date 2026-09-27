@@ -158,6 +158,31 @@ def _validate_tool_result(result: Any) -> dict[str, Any]:
     return result
 
 
+def _validate_complete_history(history: Any) -> list[dict[str, Any]]:
+    if not isinstance(history, list):
+        raise SessionError("Session contains invalid compacted history.")
+    validated = [_validate_message(message) for message in history]
+    pending: set[str] = set()
+    for message in validated:
+        content = message["content"]
+        if message["role"] == "assistant" and isinstance(content, list):
+            if pending:
+                raise SessionError("Compacted history has unfinished tool calls.")
+            pending = {block["id"] for block in content if block["type"] == "tool_use"}
+        elif message["role"] == "user" and isinstance(content, list):
+            result_ids = {
+                block["tool_use_id"]
+                for block in content
+                if block["type"] == "tool_result"
+            }
+            if result_ids != pending:
+                raise SessionError("Compacted history has mismatched tool results.")
+            pending.clear()
+    if pending:
+        raise SessionError("Compacted history has unfinished tool calls.")
+    return validated
+
+
 @dataclass
 class Session:
     """One locked JSONL session and its reconstructed model history."""
@@ -184,6 +209,10 @@ class Session:
         if status not in {"ok", "error", "cancelled", "truncated"}:
             raise ValueError(f"Unsupported turn status: {status}")
         self._append({"type": "turn.finished", "status": status})
+
+    def record_compaction(self, history: list[dict[str, Any]]) -> None:
+        validated = _validate_complete_history(history)
+        self._append({"type": "context.compacted", "history": validated})
 
     def _append(self, event: dict[str, Any]) -> None:
         if self._closed:
@@ -465,6 +494,13 @@ class SessionStore:
                     "truncated",
                 }:
                     raise SessionError("Session contains an invalid turn status.")
+            elif event_type == "context.compacted":
+                if pending:
+                    raise SessionError(
+                        "Session compaction occurred before tool results were complete."
+                    )
+                history = _validate_complete_history(record.get("history"))
+                result_message = None
             else:
                 raise SessionError(f"Unsupported session event: {event_type!r}.")
         return history, pending, sequence
