@@ -55,7 +55,7 @@ def conversation(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_MODEL", "test-model")
     calls = []
 
-    def request(messages, config, *, tools):
+    def request(messages, config, *, tools, on_text=None):
         calls.append(messages.copy())
         return ModelResponse((TextBlock(f"Answer {len(calls)}"),), "end_turn")
 
@@ -108,7 +108,7 @@ def test_interactive_empty_session_exits_without_request(
 
 
 def test_interactive_request_failure_allows_followup(conversation, monkeypatch, capsys):
-    def request(messages, config, *, tools):
+    def request(messages, config, *, tools, on_text=None):
         conversation.append(messages.copy())
         if len(conversation) == 1:
             raise ModelError("Request timed out")
@@ -129,7 +129,7 @@ def test_interactive_request_failure_allows_followup(conversation, monkeypatch, 
 
 
 def test_interactive_truncation_allows_followup(conversation, monkeypatch, capsys):
-    def request(messages, config, *, tools):
+    def request(messages, config, *, tools, on_text=None):
         conversation.append(messages.copy())
         return ModelResponse(
             (TextBlock("Partial" if len(conversation) == 1 else "Finished"),),
@@ -180,7 +180,7 @@ def test_interactive_permission_answer_is_not_a_turn(
         ]
     )
 
-    def request(messages, config, *, tools):
+    def request(messages, config, *, tools, on_text=None):
         conversation.append(messages.copy())
         return next(responses)
 

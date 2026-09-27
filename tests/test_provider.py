@@ -10,6 +10,49 @@ from mclaude import cli, provider
 from mclaude.config import ModelConfig
 
 
+def message_events(body):
+    """Encode the Messages SSE lifecycle, splitting text and tool JSON."""
+    yield {
+        "type": "message_start",
+        "message": {
+            **body,
+            "content": [],
+            "stop_reason": None,
+        },
+    }
+    for index, block in enumerate(body["content"]):
+        is_text = block["type"] == "text"
+        yield {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                **block,
+                **({"text": ""} if is_text else {"input": {}}),
+            },
+        }
+        value = block["text"] if is_text else json.dumps(block["input"])
+        split = max(1, len(value) // 2)
+        for piece in (value[:split], value[split:]):
+            yield {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "text_delta" if is_text else "input_json_delta",
+                    "text" if is_text else "partial_json": piece,
+                },
+            }
+        yield {"type": "content_block_stop", "index": index}
+    yield {
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": body["stop_reason"],
+            "stop_sequence": None,
+        },
+        "usage": {"output_tokens": 5},
+    }
+    yield {"type": "message_stop"}
+
+
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch):
     state = {
@@ -17,6 +60,9 @@ def api(monkeypatch: pytest.MonkeyPatch):
         "options": {},
         "status": 200,
         "error": None,
+        "events": None,
+        "delivered": [],
+        "stream_closed": False,
         "body": {
             "id": "msg_test",
             "type": "message",
@@ -33,6 +79,27 @@ def api(monkeypatch: pytest.MonkeyPatch):
         state["requests"].append(request)
         if state["error"]:
             raise state["error"]("simulated failure", request=request)
+        if json.loads(request.content).get("stream") and state["status"] == 200:
+
+            class Stream(httpx2.SyncByteStream):
+                def __iter__(self):
+                    events = state["events"]
+                    if events is None:
+                        events = message_events(state["body"])
+                    for event in events:
+                        if isinstance(event, BaseException):
+                            raise event
+                        state["delivered"].append(event)
+                        yield (
+                            f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+                        ).encode()
+
+                def close(self):
+                    state["stream_closed"] = True
+
+            return httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Stream()
+            )
         return httpx2.Response(state["status"], json=state["body"])
 
     def factory(**kwargs):
@@ -211,3 +278,122 @@ def test_interactive_history_reaches_sdk(api, monkeypatch, capsys):
         {"role": "user", "content": "请用中文回答"},
     ]
     assert capsys.readouterr().out == "Hello from the model\n" * 2
+
+
+def test_stream_emits_text_before_message_finishes(api):
+    api["body"]["content"] = [
+        {"type": "text", "text": "你好世界"},
+        {"type": "text", "text": "Second block"},
+    ]
+    chunks = []
+
+    def display(text):
+        assert api["delivered"][-1]["type"] != "message_stop"
+        chunks.append(text)
+
+    response = provider.create_message(
+        [{"role": "user", "content": "Hello"}],
+        ModelConfig(api_key="test-secret", model="test"),
+        on_text=display,
+    )
+    assert chunks[:2] == ["你好", "世界"]
+    assert "".join(chunks) == "你好世界\nSecond block"
+    assert response.content == (
+        provider.TextBlock("你好世界"),
+        provider.TextBlock("Second block"),
+    )
+    assert json.loads(api["requests"][0].content)["stream"] is True
+    assert api["stream_closed"] and api["client"].is_closed()
+
+
+def test_stream_tool_arguments_execute_only_after_message_stop(
+    api, tmp_path, monkeypatch
+):
+    from mclaude.agent import run_agent
+    from mclaude.tools import ToolResult
+
+    api["body"]["content"] = [
+        {"type": "text", "text": "Reading"},
+        {
+            "type": "tool_use",
+            "id": "read",
+            "name": "read_file",
+            "input": {"path": "notes.txt"},
+        },
+    ]
+    api["body"]["stop_reason"] = "tool_use"
+    executions = []
+
+    def execute(block, workspace, **kwargs):
+        assert api["delivered"][-1]["type"] == "message_stop"
+        assert api["stream_closed"]
+        executions.append(block.input)
+        api["body"]["content"] = [{"type": "text", "text": "Done"}]
+        api["body"]["stop_reason"] = "end_turn"
+        return ToolResult("File contents")
+
+    monkeypatch.setattr("mclaude.agent._execute_tool", execute)
+    chunks = []
+    history = []
+    response = run_agent(
+        "Read notes",
+        ModelConfig(api_key="test-secret", model="test"),
+        workspace=tmp_path,
+        history=history,
+        on_text=chunks.append,
+    )
+    assert executions == [{"path": "notes.txt"}]
+    assert "".join(chunks) == "Reading\nDone\n"
+    assert response.text == "Done"
+    assert history[2]["content"][0]["tool_use_id"] == "read"
+
+
+@pytest.mark.parametrize("failure", ["eof", "network", "error", "json"])
+def test_failed_stream_preserves_text_without_executing_tools(
+    api, failure, monkeypatch
+):
+    from mclaude.agent import run_agent
+
+    api["body"]["content"] = [
+        {"type": "text", "text": "Partial answer"},
+        {"type": "tool_use", "id": "read", "name": "read_file", "input": {"path": "x"}},
+    ]
+    api["body"]["stop_reason"] = "tool_use"
+    events = list(message_events(api["body"]))
+    if failure == "eof":
+        events.pop()
+    elif failure == "network":
+        events[-1] = httpx2.ReadError("secret raw body")
+    elif failure == "error":
+        events[-1] = {
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "secret"},
+        }
+    else:
+        # The SDK accepts this via its partial JSON parser; the runtime must not.
+        for event in events:
+            delta = event.get("delta", {})
+            if delta.get("partial_json", "").endswith("}"):
+                delta["partial_json"] = delta["partial_json"][:-1]
+    api["events"] = events
+
+    def unexpected_tool(*args, **kwargs):
+        pytest.fail("An incomplete stream must not execute a tool")
+
+    monkeypatch.setattr("mclaude.agent._execute_tool", unexpected_tool)
+    chunks = []
+    history = []
+    with pytest.raises(provider.ModelError) as error:
+        run_agent(
+            "Read",
+            ModelConfig(api_key="test-secret", model="test"),
+            history=history,
+            on_text=chunks.append,
+        )
+    assert "secret" not in str(error.value)
+    assert "".join(chunks) == "Partial answer\n"
+    assert history[-1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Partial answer"}],
+    }
+    assert api["stream_closed"] and api["client"].is_closed()

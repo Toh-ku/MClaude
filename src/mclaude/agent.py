@@ -15,6 +15,7 @@ from mclaude.provider import (
     ModelError,
     ModelResponse,
     TextBlock,
+    TextCallback,
     ToolUseBlock,
     create_message,
 )
@@ -86,6 +87,7 @@ def run_agent(
     request: ModelRequest | None = None,
     permission_gate: PermissionGate | None = None,
     history: list[dict[str, Any]] | None = None,
+    on_text: TextCallback | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -106,7 +108,33 @@ def run_agent(
     messages.append({"role": "user", "content": prompt})
 
     for _ in range(max_iterations):
-        response = request(messages, config, tools=TOOL_DEFINITIONS)
+        chunks: list[str] = []
+
+        def emit_text(chunk: str, buffer: list[str] = chunks) -> None:
+            buffer.append(chunk)
+            if on_text is not None:
+                on_text(chunk)
+
+        try:
+            response = request(
+                messages,
+                config,
+                tools=TOOL_DEFINITIONS,
+                **({"on_text": emit_text} if on_text is not None else {}),
+            )
+        except ModelError:
+            partial_text = "".join(chunks)
+            if partial_text.strip():
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": partial_text}],
+                    }
+                )
+            raise
+        finally:
+            if on_text is not None and chunks and not "".join(chunks).endswith("\n"):
+                on_text("\n")
         text = "\n".join(
             block.text for block in response.content if isinstance(block, TextBlock)
         )

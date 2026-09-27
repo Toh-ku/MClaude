@@ -1,5 +1,7 @@
 """Anthropic Messages API access and response normalization."""
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +14,8 @@ from anthropic import (
 )
 
 from mclaude.config import ModelConfig
+
+TextCallback = Callable[[str], None]
 
 
 class ModelError(RuntimeError):
@@ -45,11 +49,60 @@ class ModelResponse:
     stop_reason: str | None
 
 
+def _consume_stream(stream: Any, on_text: TextCallback) -> Any:
+    """Display text while the SDK assembles a complete, validated message."""
+    finished = False
+    open_blocks: set[int] = set()
+    tool_json: dict[int, str] = {}
+    seen_text = False
+    try:
+        for event in stream:
+            if event.type == "content_block_start":
+                open_blocks.add(event.index)
+                if event.content_block.type == "text":
+                    if seen_text:
+                        on_text("\n")
+                    seen_text = True
+                    if event.content_block.text:
+                        on_text(event.content_block.text)
+            elif event.type == "content_block_delta":
+                if event.delta.type == "text_delta":
+                    on_text(event.delta.text)
+                elif event.delta.type == "input_json_delta":
+                    tool_json[event.index] = (
+                        tool_json.get(event.index, "") + event.delta.partial_json
+                    )
+            elif event.type == "content_block_stop":
+                open_blocks.remove(event.index)
+            elif event.type == "message_stop":
+                finished = True
+        if not finished or open_blocks:
+            raise ModelError(
+                "The response stream ended before the message was complete."
+            )
+        message = stream.get_final_message()
+        if message.stop_reason != "max_tokens":
+            # SDK partial JSON parsing also accepts unfinished objects. Require
+            # complete JSON before any of these tool calls can be executed.
+            for value in tool_json.values():
+                if not isinstance(json.loads(value), dict):
+                    raise ModelError("The model returned invalid tool arguments.")
+        return message
+    except (ModelError, APIError):
+        raise
+    except Exception as exc:
+        # Stream transport/decoder errors can include raw response data.
+        raise ModelError(
+            "The response stream failed or contained invalid data."
+        ) from exc
+
+
 def create_message(
     messages: list[dict[str, Any]],
     config: ModelConfig,
     *,
     tools: list[dict[str, Any]] | None = None,
+    on_text: TextCallback | None = None,
 ) -> ModelResponse:
     """Send a message request and normalize the content used by the agent."""
     try:
@@ -58,12 +111,17 @@ def create_message(
             timeout=config.timeout,
             max_retries=0,
         ) as client:
-            message = client.messages.create(
-                model=config.model,
-                max_tokens=config.max_tokens,
-                messages=messages,
+            options = {
+                "model": config.model,
+                "max_tokens": config.max_tokens,
+                "messages": messages,
                 **({"tools": tools} if tools else {}),
-            )
+            }
+            if on_text is None:
+                message = client.messages.create(**options)
+            else:
+                with client.messages.stream(**options) as stream:
+                    message = _consume_stream(stream, on_text)
     except APITimeoutError as exc:
         raise ModelError("Request timed out; try again or increase --timeout.") from exc
     except APIConnectionError as exc:

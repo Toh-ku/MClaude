@@ -59,6 +59,13 @@ def _run_conversation(
             if not prompt.strip():
                 prompt = None
                 continue
+        streamed = False
+
+        def display_text(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            print(text, end="", flush=True)
+
         try:
             response = run_agent(
                 prompt,
@@ -67,12 +74,14 @@ def _run_conversation(
                 max_iterations=max_iterations,
                 permission_gate=permission_gate,
                 history=history,
+                on_text=display_text,
             )
         except ModelError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             exit_code = 1
         else:
-            print(response.text, flush=True)
+            if not streamed:
+                print(response.text, flush=True)
             if response.truncated:
                 print(
                     "Error: Output truncated; increase --max-tokens.", file=sys.stderr
