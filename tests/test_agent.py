@@ -108,6 +108,45 @@ def test_agent_sends_scoped_project_instructions(
     assert "source='AGENTS.md'" in received["system"]
 
 
+def test_agent_truncates_tool_result_to_context_budget(
+    tmp_path: Path, config: ModelConfig, monkeypatch
+) -> None:
+    responses = iter(
+        [
+            ModelResponse(
+                content=(ToolUseBlock("large", "read_file", {"path": "x"}),),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(content=(TextBlock("Done"),), stop_reason="end_turn"),
+        ]
+    )
+    seen = []
+
+    def request(messages, request_config, *, tools):
+        seen.append(messages.copy())
+        return next(responses)
+
+    monkeypatch.setattr(
+        "mclaude.agent._execute_tool",
+        lambda *args, **kwargs: ToolResult("x" * 20_000),
+    )
+    small_output_config = ModelConfig(
+        api_key=config.api_key, model=config.model, max_tokens=50
+    )
+    result = run_agent(
+        "Read",
+        small_output_config,
+        workspace=tmp_path,
+        request=request,
+        context_budget_tokens=2_000,
+    )
+    tool_result = seen[1][-1]["content"][0]
+    assert result.text == "Done"
+    assert tool_result["is_error"] is True
+    assert "truncated to fit context budget" in tool_result["content"]
+    assert len(tool_result["content"]) < 20_000
+
+
 def test_multiple_tool_calls_execute_in_order_and_return_failures(
     tmp_path: Path, config: ModelConfig
 ) -> None:

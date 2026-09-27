@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from mclaude.context import ContextError, load_project_instructions
+from mclaude.context import (
+    TOOL_TRUNCATION_MARKER,
+    ContextBudget,
+    ContextBudgetExceeded,
+    ContextError,
+    load_project_instructions,
+)
 
 
 def test_instructions_follow_ancestor_scope_and_order(tmp_path: Path) -> None:
@@ -50,3 +56,39 @@ def test_symlinked_instruction_file_is_ignored(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("File symlinks are unavailable")
     assert load_project_instructions(workspace).sources == ()
+
+
+def test_context_budget_counts_system_tools_and_output_reserve() -> None:
+    budget = ContextBudget(max_tokens=100, output_tokens=20)
+    messages = [{"role": "user", "content": "x" * 100}]
+    baseline = budget.request_tokens(messages)
+    assert budget.request_tokens(messages, system="rules") > baseline
+    assert budget.request_tokens(messages, tools=[{"name": "read"}]) > baseline
+    with pytest.raises(ContextBudgetExceeded, match="reserved output"):
+        budget.ensure_fits([{"role": "user", "content": "x" * 400}])
+
+
+def test_context_budget_truncates_tool_result_to_fit() -> None:
+    budget = ContextBudget(max_tokens=120, output_tokens=20)
+
+    def build(content: str):
+        return [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "read-1",
+                        "content": content,
+                        "is_error": False,
+                    }
+                ],
+            },
+        ]
+
+    content, truncated = budget.fit_tool_result("x" * 1000, build)
+    assert truncated is True
+    assert content.endswith(TOOL_TRUNCATION_MARKER)
+    assert len(content) < 1000
+    budget.ensure_fits(build(content))

@@ -11,7 +11,11 @@ from dotenv import load_dotenv
 
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
-from mclaude.context import ContextError, load_project_instructions
+from mclaude.context import (
+    DEFAULT_CONTEXT_BUDGET_TOKENS,
+    ContextError,
+    load_project_instructions,
+)
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
@@ -36,6 +40,7 @@ def _run_conversation(
     *,
     interactive: bool,
     max_iterations: int,
+    context_budget_tokens: int,
     session: Session | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
@@ -86,6 +91,7 @@ def _run_conversation(
                 config,
                 workspace=workspace,
                 max_iterations=max_iterations,
+                context_budget_tokens=context_budget_tokens,
                 permission_gate=permission_gate,
                 history=history,
                 on_text=display_text,
@@ -177,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_ITERATIONS,
         help=f"Maximum model requests per turn (default: {DEFAULT_MAX_ITERATIONS})",
     )
+    parser.add_argument(
+        "--context-budget",
+        type=int,
+        default=DEFAULT_CONTEXT_BUDGET_TOKENS,
+        metavar="TOKENS",
+        help=(
+            "Estimated input/output context budget "
+            f"(default: {DEFAULT_CONTEXT_BUDGET_TOKENS})"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.show_instructions:
         try:
@@ -206,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("The prompt must not be empty.")
     if args.max_iterations <= 0:
         parser.error("--max-iterations must be a positive integer.")
+    if args.context_budget <= args.max_tokens:
+        parser.error("--context-budget must be greater than --max-tokens.")
     load_dotenv(Path.cwd() / ".env", override=False)
     try:
         config = ModelConfig.from_env(
@@ -238,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 interactive=interactive,
                 max_iterations=args.max_iterations,
+                context_budget_tokens=args.context_budget,
                 session=session,
             )
         except KeyboardInterrupt:

@@ -7,7 +7,13 @@ from typing import Any
 
 from mclaude.cancellation import TurnCancelled, protect_cleanup
 from mclaude.config import ModelConfig
-from mclaude.context import ProjectInstructions, load_project_instructions
+from mclaude.context import (
+    DEFAULT_CONTEXT_BUDGET_TOKENS,
+    ContextBudget,
+    ContextBudgetExceeded,
+    ProjectInstructions,
+    load_project_instructions,
+)
 from mclaude.permissions import (
     PermissionAction,
     PermissionGate,
@@ -93,6 +99,7 @@ def run_agent(
     on_text: TextCallback | None = None,
     on_history_event: HistoryEvent | None = None,
     project_instructions: ProjectInstructions | None = None,
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -109,6 +116,10 @@ def run_agent(
     workspace = (workspace or Path.cwd()).resolve()
     project_instructions = project_instructions or load_project_instructions(workspace)
     system_prompt = project_instructions.system_prompt()
+    try:
+        context_budget = ContextBudget(context_budget_tokens, config.max_tokens)
+    except ValueError as exc:
+        raise ModelError(str(exc)) from exc
     request = request or create_message
     permission_gate = permission_gate or PermissionGate()
     messages = history if history is not None else []
@@ -126,6 +137,12 @@ def run_agent(
                 on_text(chunk)
 
         try:
+            try:
+                context_budget.ensure_fits(
+                    messages, tools=TOOL_DEFINITIONS, system=system_prompt
+                )
+            except ContextBudgetExceeded as exc:
+                raise ModelError(str(exc)) from exc
             response = request(
                 messages,
                 config,
@@ -224,11 +241,43 @@ def run_agent(
                         f"{permission.reason}",
                         is_error=True,
                     )
+                original_content = result.content
+
+                def build_messages(
+                    candidate: str,
+                    *,
+                    call_id: str = call.id,
+                    error: bool = result.is_error,
+                    prior_results: list[dict[str, Any]] = results,
+                ) -> list[dict[str, Any]]:
+                    candidate_result = {
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": candidate,
+                        "is_error": error,
+                    }
+                    return [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": [*prior_results, candidate_result],
+                        },
+                    ]
+
+                try:
+                    fitted_content, budget_truncated = context_budget.fit_tool_result(
+                        original_content,
+                        build_messages,
+                        tools=TOOL_DEFINITIONS,
+                        system=system_prompt,
+                    )
+                except ContextBudgetExceeded as exc:
+                    raise ModelError(str(exc)) from exc
                 result_block = {
                     "type": "tool_result",
                     "tool_use_id": call.id,
-                    "content": result.content,
-                    "is_error": result.is_error,
+                    "content": fitted_content,
+                    "is_error": result.is_error or budget_truncated,
                 }
                 results.append(result_block)
                 if on_history_event is not None:
