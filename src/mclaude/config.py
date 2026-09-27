@@ -15,6 +15,8 @@ class ModelConfig:
     model: str
     max_tokens: int = 1024
     timeout: float = 60.0
+    request_retries: int = 2
+    retry_delay: float = 0.5
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
@@ -25,6 +27,15 @@ class ModelConfig:
             raise ConfigurationError("--max-tokens must be a positive integer.")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ConfigurationError("--timeout must be a finite positive number.")
+        if (
+            not isinstance(self.request_retries, int)
+            or not 0 <= self.request_retries <= 10
+        ):
+            raise ConfigurationError("--request-retries must be between 0 and 10.")
+        if not math.isfinite(self.retry_delay) or self.retry_delay < 0:
+            raise ConfigurationError(
+                "--retry-delay must be a finite non-negative number."
+            )
 
     @classmethod
     def from_env(
@@ -33,6 +44,8 @@ class ModelConfig:
         model: str | None = None,
         max_tokens: int = 1024,
         timeout: float = 60.0,
+        request_retries: int = 2,
+        retry_delay: float = 0.5,
     ) -> "ModelConfig":
         return cls(
             api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
@@ -41,4 +54,6 @@ class ModelConfig:
             ).strip(),
             max_tokens=max_tokens,
             timeout=timeout,
+            request_retries=request_retries,
+            retry_delay=retry_delay,
         )

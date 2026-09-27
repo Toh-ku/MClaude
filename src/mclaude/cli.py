@@ -180,6 +180,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Request timeout in seconds (default: 60)",
     )
     parser.add_argument(
+        "--request-retries",
+        type=int,
+        default=2,
+        help="Retries for transient model request failures (default: 2)",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=0.5,
+        help="Initial retry backoff in seconds (default: 0.5)",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=DEFAULT_MAX_ITERATIONS,
@@ -229,7 +241,11 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path.cwd() / ".env", override=False)
     try:
         config = ModelConfig.from_env(
-            model=args.model, max_tokens=args.max_tokens, timeout=args.timeout
+            model=args.model,
+            max_tokens=args.max_tokens,
+            timeout=args.timeout,
+            request_retries=args.request_retries,
+            retry_delay=args.retry_delay,
         )
     except ConfigurationError as exc:
         parser.error(str(exc))

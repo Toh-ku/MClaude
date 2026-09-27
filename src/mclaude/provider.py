@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -57,6 +58,7 @@ async def _consume_stream(stream: Any, on_text: TextCallback) -> Any:
     open_blocks: set[int] = set()
     tool_json: dict[int, str] = {}
     seen_text = False
+    emitted_text = False
     try:
         async for event in stream:
             if event.type == "content_block_start":
@@ -67,9 +69,11 @@ async def _consume_stream(stream: Any, on_text: TextCallback) -> Any:
                     seen_text = True
                     if event.content_block.text:
                         on_text(event.content_block.text)
+                        emitted_text = True
             elif event.type == "content_block_delta":
                 if event.delta.type == "text_delta":
                     on_text(event.delta.text)
+                    emitted_text = emitted_text or bool(event.delta.text)
                 elif event.delta.type == "input_json_delta":
                     tool_json[event.index] = (
                         tool_json.get(event.index, "") + event.delta.partial_json
@@ -90,7 +94,13 @@ async def _consume_stream(stream: Any, on_text: TextCallback) -> Any:
                 if not isinstance(json.loads(value), dict):
                     raise ModelError("The model returned invalid tool arguments.")
         return message
-    except (ModelError, APIError):
+    except ModelError:
+        raise
+    except APIError as exc:
+        if emitted_text:
+            raise ModelError(
+                "The response stream failed after output began; it was not retried."
+            ) from exc
         raise
     except Exception as exc:
         # Stream transport/decoder errors can include raw response data.
@@ -122,47 +132,67 @@ def create_message(
     on_text: TextCallback | None = None,
 ) -> ModelResponse:
     """Send a message request and normalize the content used by the agent."""
-    try:
-        options = {
-            "model": config.model,
-            "max_tokens": config.max_tokens,
-            "messages": messages,
-            **({"tools": tools} if tools else {}),
-            **({"system": system} if system else {}),
-        }
-        if on_text is None:
-            with Anthropic(
-                api_key=config.api_key,
-                timeout=config.timeout,
-                max_retries=0,
-            ) as client:
-                message = client.messages.create(**options)
-        else:
-            message = asyncio.run(_stream_message(options, config, on_text))
-    except APITimeoutError as exc:
-        raise ModelError("Request timed out; try again or increase --timeout.") from exc
-    except APIConnectionError as exc:
-        raise ModelError(
-            "Cannot connect to the API; check your network and ANTHROPIC_BASE_URL."
-        ) from exc
-    except APIStatusError as exc:
-        explanations = {
-            400: "Invalid request; check the model and request parameters.",
-            401: "Authentication failed; check ANTHROPIC_API_KEY.",
-            403: "Access denied; check your API key permissions and model access.",
-            404: "Model or endpoint not found; check the model and ANTHROPIC_BASE_URL.",
-            429: "API rate limit or quota reached; try later or check your quota.",
-        }
-        detail = explanations.get(
-            exc.status_code,
-            "API service unavailable; try again later."
-            if exc.status_code >= 500
-            else "API rejected the request; check your configuration.",
-        )
-        # Do not include server bodies, which may echo credentials or prompt text.
-        raise ModelError(f"HTTP {exc.status_code}: {detail}") from exc
-    except APIError as exc:
-        raise ModelError("The API returned an invalid response.") from exc
+    options = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "messages": messages,
+        **({"tools": tools} if tools else {}),
+        **({"system": system} if system else {}),
+    }
+    for attempt in range(config.request_retries + 1):
+        try:
+            if on_text is None:
+                with Anthropic(
+                    api_key=config.api_key,
+                    timeout=config.timeout,
+                    max_retries=0,
+                ) as client:
+                    message = client.messages.create(**options)
+            else:
+                message = asyncio.run(_stream_message(options, config, on_text))
+            break
+        except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
+            retryable = not isinstance(exc, APIStatusError) or exc.status_code in {
+                429,
+                500,
+                502,
+                503,
+                504,
+                529,
+            }
+            if retryable and attempt < config.request_retries:
+                time.sleep(config.retry_delay * (2**attempt))
+                continue
+            if isinstance(exc, APITimeoutError):
+                raise ModelError(
+                    "Request timed out after retry attempts; try again or increase "
+                    "--timeout."
+                ) from exc
+            if isinstance(exc, APIConnectionError):
+                raise ModelError(
+                    "Cannot connect to the API after retry attempts; check your "
+                    "network and ANTHROPIC_BASE_URL."
+                ) from exc
+            explanations = {
+                400: "Invalid request; check the model and request parameters.",
+                401: "Authentication failed; check ANTHROPIC_API_KEY.",
+                403: "Access denied; check your API key permissions and model access.",
+                404: (
+                    "Model or endpoint not found; check the model and "
+                    "ANTHROPIC_BASE_URL."
+                ),
+                429: "API rate limit or quota reached; try later or check your quota.",
+            }
+            detail = explanations.get(
+                exc.status_code,
+                "API service unavailable; try again later."
+                if exc.status_code >= 500
+                else "API rejected the request; check your configuration.",
+            )
+            # Do not include server bodies, which may echo credentials or prompt text.
+            raise ModelError(f"HTTP {exc.status_code}: {detail}") from exc
+        except APIError as exc:
+            raise ModelError("The API returned an invalid response.") from exc
 
     content: list[ContentBlock] = []
     for block in message.content:

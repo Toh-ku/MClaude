@@ -39,6 +39,10 @@ def test_missing_configuration(key, model, expected, monkeypatch):
         ["Hello", "--timeout", "-1"],
         ["Hello", "--timeout", "nan"],
         ["Hello", "--timeout", "inf"],
+        ["Hello", "--request-retries", "-1"],
+        ["Hello", "--request-retries", "11"],
+        ["Hello", "--retry-delay", "-1"],
+        ["Hello", "--retry-delay", "nan"],
     ],
 )
 def test_invalid_cli_values_never_call_model(args, monkeypatch, capsys):

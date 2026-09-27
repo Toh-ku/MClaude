@@ -65,6 +65,7 @@ def api(monkeypatch: pytest.MonkeyPatch):
         "events": None,
         "delivered": [],
         "stream_closed": False,
+        "failures_remaining": 0,
         "body": {
             "id": "msg_test",
             "type": "message",
@@ -79,6 +80,12 @@ def api(monkeypatch: pytest.MonkeyPatch):
 
     def handle(request):
         state["requests"].append(request)
+        if state["failures_remaining"]:
+            failure_status = state["status"]
+            state["failures_remaining"] -= 1
+            if not state["failures_remaining"]:
+                state["status"] = 200
+            return httpx2.Response(failure_status, json=state["body"])
         if state["error"]:
             raise state["error"]("simulated failure", request=request)
         if json.loads(request.content).get("stream") and state["status"] == 200:
@@ -204,14 +211,17 @@ def test_system_prompt_is_sent(api):
         (529, "unavailable"),
     ],
 )
-def test_http_errors_are_clear_and_not_retried(api, status, expected):
+def test_http_errors_are_clear(api, status, expected):
     api["status"] = status
     api["body"] = {
         "type": "error",
         "error": {"type": "api_error", "message": "echoed-secret"},
     }
     with pytest.raises(provider.ModelError, match=expected) as error:
-        provider.complete("Hello", ModelConfig(api_key="test-secret", model="test"))
+        provider.complete(
+            "Hello",
+            ModelConfig(api_key="test-secret", model="test", request_retries=0),
+        )
     assert f"HTTP {status}" in str(error.value)
     assert "echoed-secret" not in str(error.value)
     assert len(api["requests"]) == 1
@@ -225,8 +235,58 @@ def test_http_errors_are_clear_and_not_retried(api, status, expected):
 def test_network_errors(api, error, expected):
     api["error"] = error
     with pytest.raises(provider.ModelError, match=expected):
-        provider.complete("Hello", ModelConfig(api_key="test-secret", model="test"))
+        provider.complete(
+            "Hello",
+            ModelConfig(api_key="test-secret", model="test", request_retries=0),
+        )
     assert len(api["requests"]) == 1
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 529])
+def test_transient_status_is_retried_with_backoff(api, monkeypatch, status):
+    api["status"] = status
+    api["failures_remaining"] = 2
+    delays = []
+    monkeypatch.setattr(provider.time, "sleep", delays.append)
+    response = provider.complete(
+        "Hello",
+        ModelConfig(
+            api_key="test-secret",
+            model="test",
+            request_retries=2,
+            retry_delay=0.25,
+        ),
+    )
+    assert response.text == "Hello from the model"
+    assert len(api["requests"]) == 3
+    assert delays == [0.25, 0.5]
+
+
+def test_non_retryable_status_fails_once(api, monkeypatch):
+    api["status"] = 401
+    monkeypatch.setattr(
+        provider.time,
+        "sleep",
+        lambda delay: pytest.fail("Authentication errors must not be retried"),
+    )
+    with pytest.raises(provider.ModelError, match="Authentication failed"):
+        provider.complete("Hello", ModelConfig(api_key="secret", model="test"))
+    assert len(api["requests"]) == 1
+
+
+def test_stream_retries_before_output_begins(api, monkeypatch):
+    api["status"] = 503
+    api["failures_remaining"] = 1
+    monkeypatch.setattr(provider.time, "sleep", lambda _: None)
+    chunks = []
+    response = provider.create_message(
+        [{"role": "user", "content": "Hello"}],
+        ModelConfig(api_key="secret", model="test", request_retries=1),
+        on_text=chunks.append,
+    )
+    assert response.content == (provider.TextBlock("Hello from the model"),)
+    assert "".join(chunks) == "Hello from the model"
+    assert len(api["requests"]) == 2
 
 
 @pytest.mark.parametrize("reason", ["tool_use", "refusal", "pause_turn", None])
@@ -413,6 +473,7 @@ def test_failed_stream_preserves_text_without_executing_tools(
             on_text=chunks.append,
         )
     assert "secret" not in str(error.value)
+    assert len(api["requests"]) == 1
     assert "".join(chunks) == "Partial answer\n"
     assert history[-1] == {
         "role": "assistant",
