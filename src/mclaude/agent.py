@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from mclaude.config import ModelConfig
+from mclaude.permissions import (
+    PermissionAction,
+    PermissionGate,
+    PermissionRequest,
+)
 from mclaude.provider import (
     ModelError,
     ModelResponse,
@@ -70,6 +75,7 @@ def run_agent(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_file_chars: int = DEFAULT_MAX_FILE_CHARS,
     request: ModelRequest | None = None,
+    permission_gate: PermissionGate | None = None,
 ) -> AgentResponse:
     """Run until the model answers, truncates, fails, or exhausts the loop limit."""
     if not prompt.strip():
@@ -81,6 +87,7 @@ def run_agent(
 
     workspace = (workspace or Path.cwd()).resolve()
     request = request or create_message
+    permission_gate = permission_gate or PermissionGate()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
     for _ in range(max_iterations):
@@ -116,7 +123,16 @@ def run_agent(
         messages.append({"role": "assistant", "content": _assistant_content(response)})
         results: list[dict[str, Any]] = []
         for call in tool_calls:
-            result = _execute_tool(call, workspace, max_file_chars=max_file_chars)
+            permission = permission_gate.check(
+                PermissionRequest(tool_name=call.name, tool_input=call.input)
+            )
+            if permission.action is PermissionAction.ALLOW:
+                result = _execute_tool(call, workspace, max_file_chars=max_file_chars)
+            else:
+                result = ToolResult(
+                    f"Permission denied for tool '{call.name}': {permission.reason}",
+                    is_error=True,
+                )
             results.append(
                 {
                     "type": "tool_result",

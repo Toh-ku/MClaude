@@ -1,6 +1,7 @@
 """Command-line entry point for MClaude."""
 
 import argparse
+import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -9,7 +10,21 @@ from dotenv import load_dotenv
 
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
+from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
+
+
+def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
+    """Ask the terminal user to approve one tool call."""
+    tool_input = json.dumps(request.tool_input, ensure_ascii=False, sort_keys=True)
+    print(
+        f"Permission required for tool '{request.tool_name}': {reason}",
+        file=sys.stderr,
+    )
+    print(f"Input: {tool_input}", file=sys.stderr)
+    print("Allow this tool call? [y/N] ", end="", file=sys.stderr, flush=True)
+    answer = input()
+    return answer.strip().casefold() in {"y", "yes"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,7 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigurationError as exc:
         parser.error(str(exc))
     try:
-        response = run_agent(args.prompt, config, max_iterations=args.max_iterations)
+        response = run_agent(
+            args.prompt,
+            config,
+            max_iterations=args.max_iterations,
+            permission_gate=PermissionGate(prompt=_prompt_tool_permission),
+        )
     except ModelError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

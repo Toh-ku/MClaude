@@ -6,6 +6,7 @@ import pytest
 
 from mclaude.agent import run_agent
 from mclaude.config import ModelConfig
+from mclaude.permissions import PermissionAction, PermissionDecision, PermissionGate
 from mclaude.provider import ModelError, ModelResponse, TextBlock, ToolUseBlock
 
 
@@ -139,6 +140,54 @@ def test_agent_executes_workspace_search_tools(
     tool_results = seen_messages[1][-1]["content"]
     assert tool_results[0]["content"] == "module.py"
     assert tool_results[1]["content"] == "module.py:1:def target():"
+
+
+def test_agent_does_not_execute_denied_tool_and_returns_reason(
+    tmp_path: Path, config: ModelConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = iter(
+        [
+            ModelResponse(
+                content=(ToolUseBlock("blocked", "read_file", {"path": "secret"}),),
+                stop_reason="tool_use",
+            ),
+            ModelResponse(
+                content=(TextBlock("Permission was denied."),), stop_reason="end_turn"
+            ),
+        ]
+    )
+    seen_messages = []
+
+    def request(messages, request_config, *, tools):
+        seen_messages.append(messages.copy())
+        return next(responses)
+
+    def unexpected_execution(*args, **kwargs):
+        pytest.fail("Denied tool was executed")
+
+    monkeypatch.setattr("mclaude.agent._execute_tool", unexpected_execution)
+    gate = PermissionGate(
+        policy=lambda _: PermissionDecision(
+            PermissionAction.DENY, "This path is restricted."
+        )
+    )
+
+    result = run_agent(
+        "Read the secret",
+        config,
+        workspace=tmp_path,
+        request=request,
+        permission_gate=gate,
+    )
+
+    assert result.text == "Permission was denied."
+    tool_result = seen_messages[1][-1]["content"][0]
+    assert tool_result == {
+        "type": "tool_result",
+        "tool_use_id": "blocked",
+        "content": ("Permission denied for tool 'read_file': This path is restricted."),
+        "is_error": True,
+    }
 
 
 def test_agent_preserves_partial_text_when_output_is_truncated(
