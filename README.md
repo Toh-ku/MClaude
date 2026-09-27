@@ -39,15 +39,15 @@ uv run mclaude "读取 README.md 并用一句话总结"
 uv run mclaude "读取 pyproject.toml 并总结依赖" --model "你的模型 ID" --max-tokens 2048 --timeout 90
 ```
 
-也可以复制 `.env.example` 为本地 `.env`，填写配置后显式加载：
+也可以复制 `.env.example` 为本地 `.env`，程序启动时会自动加载：
 
 ```powershell
 Copy-Item .env.example .env
 # 编辑 .env，填写 API 密钥与模型 ID
-uv run --env-file .env mclaude "你好"
+uv run mclaude "你好"
 ```
 
-程序不会自动读取 `.env`。该文件已被 Git 忽略，勿提交真实密钥。可选的 `ANTHROPIC_BASE_URL` 由 SDK 读取，用于指定兼容 Anthropic Messages API 的服务；默认连接 Anthropic 官方 API。
+程序读取当前工作目录下的 `.env`，但不会覆盖已有的系统环境变量。该文件已被 Git 忽略，勿提交真实密钥。可选的 `ANTHROPIC_BASE_URL` 由 SDK 读取，用于指定兼容 Anthropic Messages API 的服务；默认连接 Anthropic 官方 API。
 
 每次运行处理一个任务。单次运行期间会保留模型回复、工具调用和工具结果，当前仅提供只读的 `read_file` 工具；路径解析后必须位于启动命令时的当前工作目录内。单个文件最多向模型返回 100,000 个字符，超出部分会明确标记截断。Agent 默认最多发起 8 次模型请求，可通过 `--max-iterations` 调整，避免异常调用无限循环。
 

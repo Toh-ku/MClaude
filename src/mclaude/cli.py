@@ -3,6 +3,9 @@
 import argparse
 import sys
 from importlib.metadata import version
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
@@ -47,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("The prompt must not be empty.")
     if args.max_iterations <= 0:
         parser.error("--max-iterations must be a positive integer.")
+    load_dotenv(Path.cwd() / ".env", override=False)
     try:
         config = ModelConfig.from_env(
             model=args.model, max_tokens=args.max_tokens, timeout=args.timeout

@@ -3,6 +3,7 @@
 import pytest
 
 from mclaude import cli
+from mclaude.agent import AgentResponse
 from mclaude.config import ConfigurationError, ModelConfig
 
 
@@ -54,7 +55,32 @@ def test_invalid_cli_values_never_call_model(args, monkeypatch, capsys):
     assert "error:" in capsys.readouterr().err
 
 
-def test_cli_missing_key_is_actionable(capsys):
+def test_cli_loads_dotenv_without_overriding_environment(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".env").write_text(
+        "ANTHROPIC_API_KEY=dotenv-secret\nANTHROPIC_MODEL=dotenv-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "environment-model")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    captured = {}
+
+    def fake_agent(prompt, config, **kwargs):
+        captured["config"] = config
+        return AgentResponse("ok")
+
+    monkeypatch.setattr(cli, "run_agent", fake_agent)
+
+    assert cli.main(["Hello"]) == 0
+    assert captured["config"].api_key == "dotenv-secret"
+    assert captured["config"].model == "environment-model"
+    assert capsys.readouterr().out == "ok\n"
+
+
+def test_cli_missing_key_is_actionable(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     with pytest.raises(SystemExit) as error:
         cli.main(["Hello"])
     assert error.value.code == 2
