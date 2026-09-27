@@ -16,6 +16,7 @@ from mclaude.context import (
     compact_history,
     load_project_instructions,
 )
+from mclaude.hooks import HookRunner
 from mclaude.permissions import (
     READ_ONLY_TOOLS,
     PermissionAction,
@@ -119,6 +120,7 @@ def run_agent(
     checkpoint_store: CheckpointStore | None = None,
     task_board: TaskBoard | None = None,
     planning: bool = False,
+    hooks: HookRunner | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -286,19 +288,26 @@ def run_agent(
                     )
                 if permission.action is PermissionAction.ALLOW:
                     executing = True
-                    if call.name in {"list_tasks", "update_tasks"}:
-                        result = task_board.execute(
-                            call.name, call.input, on_history_event
-                        )
-                    elif call.name == "load_skill":
-                        result = skills.load(call.input)
-                    else:
-                        result = _execute_tool(
+
+                    def execute(call: ToolUseBlock = call) -> ToolResult:
+                        if call.name in {"list_tasks", "update_tasks"}:
+                            return task_board.execute(
+                                call.name, call.input, on_history_event
+                            )
+                        if call.name == "load_skill":
+                            return skills.load(call.input)
+                        return _execute_tool(
                             call,
                             workspace,
                             max_file_chars=max_file_chars,
                             checkpoints=checkpoint_store,
                         )
+
+                    result = (
+                        hooks.execute(call.name, call.input, workspace, execute)
+                        if hooks is not None and not planning
+                        else execute()
+                    )
                 else:
                     result = ToolResult(
                         f"Permission denied for tool '{call.name}': "

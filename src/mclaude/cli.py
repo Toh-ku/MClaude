@@ -16,6 +16,7 @@ from mclaude.context import (
     ContextError,
     load_project_instructions,
 )
+from mclaude.hooks import HookError, HookRunner
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
@@ -45,6 +46,7 @@ def _run_conversation(
     context_budget_tokens: int,
     session: Session | None = None,
     planning: bool = False,
+    hooks: HookRunner | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
@@ -115,6 +117,7 @@ def _run_conversation(
                 history=history,
                 task_board=task_board,
                 planning=planning,
+                hooks=hooks,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )
@@ -157,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "--hooks", type=Path, help="Explicitly enable hooks from a JSON file"
+    )
     parser.add_argument(
         "--list-skills", action="store_true", help="List available skills"
     )
@@ -282,6 +288,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     session: Session | None = None
     try:
+        hooks = HookRunner.from_file(args.hooks) if args.hooks else None
+    except HookError as exc:
+        parser.error(str(exc))
+    try:
         if interactive and not args.no_persist:
             store = SessionStore()
             workspace = Path.cwd()
@@ -308,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
                 context_budget_tokens=args.context_budget,
                 session=session,
                 planning=args.plan,
+                hooks=hooks,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)

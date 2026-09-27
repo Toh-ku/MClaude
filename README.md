@@ -112,6 +112,18 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 ## 开发检查
 
+## 生命周期 Hooks
+
+通过 `--hooks path/to/hooks.json` 显式启用受信任的本地程序。配置示例：
+
+```json
+{"before_tool": [{"command": ["python", "check.py"], "tools": ["create_file"], "timeout": 10}], "after_tool": []}
+```
+
+`tools` 默认为 `["*"]`，匹配工具全名；`command` 是 argv 数组，不经过 shell。Hook 从 stdin 接收 JSON（`event`、`tool_name`、`tool_input`；after 还含 `result`），stdout 返回 JSON：before 可返回 `{"block": true, "reason": "原因"}` 阻止工具，after 可返回 `{"append": "补充说明"}`；空输出等同 `{}`。权限通过后才运行 before；被拒工具不触发 Hook。before 失败时工具不会执行，after 失败则保留已有结果并标记错误，不会撤销或重跑工具。默认超时 10 秒，可设置到 60 秒；输出上限 16 KiB，超时与取消清理进程树。Hook 具有普通本地程序权限，规划模式完全禁用 Hooks。
+
+## 开发检查
+
 技能位于工作区 `.mclaude/skills/<目录>/SKILL.md`。文件以 `---` 包围的元数据开头，要求 `name: lowercase-name` 与单行 `description: 简要说明`（支持普通文本或引号字符串），结束 `---` 后是正文。`--list-skills` 无需凭据即可查看描述和发现错误；模型仅在 `load_skill` 后获得正文。目录或文件符号链接被忽略，元数据最多 8,192 字符、目录最多 100 个技能、正文文件最多 100,000 字符。
 
 
