@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "A Python coding agent built incrementally."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "anthropic>=1.8.0",
+]
 
 [project.scripts]
 mclaude = "mclaude.cli:main"
@@ -15,6 +17,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
     "pytest>=8.3",
     "ruff>=0.9",
 ]
