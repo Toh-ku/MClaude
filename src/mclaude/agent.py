@@ -31,6 +31,7 @@ from mclaude.provider import (
     ToolUseBlock,
     create_message,
 )
+from mclaude.skills import LOAD_SKILL_DEFINITION, SkillCatalog
 from mclaude.tasks import TASK_DEFINITIONS, TaskBoard
 from mclaude.tools import (
     TOOL_DEFINITIONS,
@@ -137,7 +138,12 @@ def run_agent(
     system_prompt = project_instructions.system_prompt()
     base_system_prompt = system_prompt or ""
     task_board = task_board if task_board is not None else TaskBoard()
-    tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS]
+    skills = SkillCatalog(workspace)
+    tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS, LOAD_SKILL_DEFINITION]
+    if skills.skills:
+        base_system_prompt += (
+            "\nAvailable skills (load on demand):\n" + skills.summary()
+        )
     if planning:
         tool_definitions = [
             tool for tool in tool_definitions if tool["name"] in READ_ONLY_TOOLS
@@ -284,6 +290,8 @@ def run_agent(
                         result = task_board.execute(
                             call.name, call.input, on_history_event
                         )
+                    elif call.name == "load_skill":
+                        result = skills.load(call.input)
                     else:
                         result = _execute_tool(
                             call,

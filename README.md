@@ -112,6 +112,8 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 ## 开发检查
 
+技能位于工作区 `.mclaude/skills/<目录>/SKILL.md`。文件以 `---` 包围的元数据开头，要求 `name: lowercase-name` 与单行 `description: 简要说明`（支持普通文本或引号字符串），结束 `---` 后是正文。`--list-skills` 无需凭据即可查看描述和发现错误；模型仅在 `load_skill` 后获得正文。目录或文件符号链接被忽略，元数据最多 8,192 字符、目录最多 100 个技能、正文文件最多 100,000 字符。
+
 
 ```powershell
 uv run ruff format --check .

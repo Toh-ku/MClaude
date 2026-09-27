@@ -19,6 +19,7 @@ from mclaude.context import (
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
+from mclaude.skills import SkillCatalog
 from mclaude.tasks import TaskBoard
 
 
@@ -157,6 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
     parser.add_argument(
+        "--list-skills", action="store_true", help="List available skills"
+    )
+    parser.add_argument(
         "--plan", action="store_true", help="Analyze using only read-only tools"
     )
     parser.add_argument(
@@ -229,6 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if args.list_skills:
+        skills = SkillCatalog(Path.cwd())
+        print(skills.summary() or "No skills discovered.")
+        for warning in skills.warnings:
+            print(warning, file=sys.stderr)
+        return 0
     if args.show_instructions:
         try:
             instructions = load_project_instructions(Path.cwd())
