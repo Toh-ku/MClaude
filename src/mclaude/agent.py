@@ -17,7 +17,9 @@ from mclaude.context import (
     load_project_instructions,
 )
 from mclaude.permissions import (
+    READ_ONLY_TOOLS,
     PermissionAction,
+    PermissionDecision,
     PermissionGate,
     PermissionRequest,
 )
@@ -115,6 +117,7 @@ def run_agent(
     context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     checkpoint_store: CheckpointStore | None = None,
     task_board: TaskBoard | None = None,
+    planning: bool = False,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -135,6 +138,14 @@ def run_agent(
     base_system_prompt = system_prompt or ""
     task_board = task_board if task_board is not None else TaskBoard()
     tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS]
+    if planning:
+        tool_definitions = [
+            tool for tool in tool_definitions if tool["name"] in READ_ONLY_TOOLS
+        ]
+        base_system_prompt += (
+            "\nPlanning mode: analyze with read-only tools and return a plan. "
+            "File modifications, commands and task updates are prohibited."
+        )
     try:
         context_budget = ContextBudget(context_budget_tokens, config.max_tokens)
     except ValueError as exc:
@@ -259,9 +270,14 @@ def run_agent(
             for call in tool_calls:
                 active_call = call.id
                 executing = False
-                permission = permission_gate.check(
-                    PermissionRequest(tool_name=call.name, tool_input=call.input)
-                )
+                if planning and call.name not in READ_ONLY_TOOLS:
+                    permission = PermissionDecision(
+                        PermissionAction.DENY, "Tool is blocked in planning mode."
+                    )
+                else:
+                    permission = permission_gate.check(
+                        PermissionRequest(tool_name=call.name, tool_input=call.input)
+                    )
                 if permission.action is PermissionAction.ALLOW:
                     executing = True
                     if call.name in {"list_tasks", "update_tasks"}:

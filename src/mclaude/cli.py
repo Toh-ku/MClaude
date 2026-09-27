@@ -43,6 +43,7 @@ def _run_conversation(
     max_iterations: int,
     context_budget_tokens: int,
     session: Session | None = None,
+    planning: bool = False,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
@@ -88,6 +89,13 @@ def _run_conversation(
                 print(task_board.render())
                 prompt = None
                 continue
+            if prompt.strip().casefold() in {"/plan", "/execute"}:
+                planning = prompt.strip().casefold() == "/plan"
+                print(
+                    f"Mode: {'planning' if planning else 'execution'}", file=sys.stderr
+                )
+                prompt = None
+                continue
         streamed = False
 
         def display_text(text: str) -> None:
@@ -105,6 +113,7 @@ def _run_conversation(
                 permission_gate=permission_gate,
                 history=history,
                 task_board=task_board,
+                planning=planning,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )
@@ -147,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "--plan", action="store_true", help="Analyze using only read-only tools"
+    )
     parser.add_argument(
         "-i",
         "--interactive",
@@ -285,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_iterations=args.max_iterations,
                 context_budget_tokens=args.context_budget,
                 session=session,
+                planning=args.plan,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)
