@@ -13,6 +13,7 @@ from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.config import ConfigurationError, ModelConfig
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
+from mclaude.session import Session, SessionError, SessionStore
 
 
 def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
@@ -34,9 +35,10 @@ def _run_conversation(
     *,
     interactive: bool,
     max_iterations: int,
+    session: Session | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
-    history: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = session.history if session is not None else []
     workspace = Path.cwd()
     permission_gate = PermissionGate(prompt=_prompt_tool_permission)
     exit_code = 0
@@ -46,6 +48,17 @@ def _run_conversation(
             "Ctrl+C cancels the current turn; at the input prompt it exits.",
             file=sys.stderr,
         )
+
+    def record_history_event(event_type: str, payload: dict[str, Any]) -> None:
+        if session is None:
+            return
+        if event_type == "message":
+            session.record_message(payload)
+        elif event_type == "tool_result":
+            session.record_tool_result(payload)
+        else:
+            raise SessionError(f"Unsupported history event: {event_type}")
+
     while True:
         if prompt is None:
             print("You> ", end="", file=sys.stderr, flush=True)
@@ -75,14 +88,19 @@ def _run_conversation(
                 permission_gate=permission_gate,
                 history=history,
                 on_text=display_text,
+                on_history_event=record_history_event if session is not None else None,
             )
         except KeyboardInterrupt:
+            if session is not None:
+                session.record_turn("cancelled")
             if not interactive:
                 raise
             print(
                 "\nTurn cancelled. You can continue the conversation.", file=sys.stderr
             )
         except ModelError as exc:
+            if session is not None:
+                session.record_turn("error")
             print(f"Error: {exc}", file=sys.stderr)
             exit_code = 1
         else:
@@ -93,6 +111,8 @@ def _run_conversation(
                     "Error: Output truncated; increase --max-tokens.", file=sys.stderr
                 )
                 exit_code = 1
+            if session is not None:
+                session.record_turn("truncated" if response.truncated else "ok")
         if not interactive:
             return exit_code
         prompt = None
@@ -115,6 +135,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Start a conversation, optionally beginning with the supplied prompt",
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the most recent session for the current workspace",
+    )
+    resume_group.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a specific session for the current workspace",
+    )
+    parser.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="Run an interactive conversation without saving it",
+    )
     parser.add_argument("--model", help="Model ID (overrides ANTHROPIC_MODEL)")
     parser.add_argument(
         "--max-tokens",
@@ -135,7 +172,14 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Maximum model requests per turn (default: {DEFAULT_MAX_ITERATIONS})",
     )
     args = parser.parse_args(argv)
-    interactive = args.interactive or (args.prompt is None and sys.stdin.isatty())
+    if args.no_persist and (args.continue_session or args.resume):
+        parser.error("--no-persist cannot be combined with --continue or --resume.")
+    interactive = (
+        args.interactive
+        or args.continue_session
+        or args.resume is not None
+        or (args.prompt is None and sys.stdin.isatty())
+    )
     if args.prompt is None and not interactive:
         parser.print_help()
         return 0
@@ -150,13 +194,39 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ConfigurationError as exc:
         parser.error(str(exc))
+    session: Session | None = None
     try:
-        return _run_conversation(
-            args.prompt,
-            config,
-            interactive=interactive,
-            max_iterations=args.max_iterations,
-        )
-    except KeyboardInterrupt:
-        print("\nRequest interrupted.", file=sys.stderr)
-        return 130
+        if interactive and not args.no_persist:
+            store = SessionStore()
+            workspace = Path.cwd()
+            if args.resume is not None:
+                session = store.resume(args.resume, workspace)
+                print(f"Resumed session: {session.id}", file=sys.stderr)
+            elif args.continue_session:
+                session = store.continue_latest(workspace)
+                print(f"Resumed session: {session.id}", file=sys.stderr)
+            else:
+                session = store.create(workspace, config.model)
+                print(f"Session: {session.id}", file=sys.stderr)
+            if session.recovery_warning:
+                print(
+                    f"Session recovery warning: {session.recovery_warning}",
+                    file=sys.stderr,
+                )
+        try:
+            return _run_conversation(
+                args.prompt,
+                config,
+                interactive=interactive,
+                max_iterations=args.max_iterations,
+                session=session,
+            )
+        except KeyboardInterrupt:
+            print("\nRequest interrupted.", file=sys.stderr)
+            return 130
+    except SessionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if session is not None:
+            session.close()

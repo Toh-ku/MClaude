@@ -53,6 +53,7 @@ def conversation(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-secret")
     monkeypatch.setenv("ANTHROPIC_MODEL", "test-model")
+    monkeypatch.setenv("MCLAUDE_STATE_DIR", str(tmp_path / ".state"))
     calls = []
 
     def request(messages, config, *, tools, on_text=None):
@@ -244,3 +245,42 @@ def test_positional_prompt_stays_single_turn_in_terminal(conversation, monkeypat
     monkeypatch.setattr("builtins.input", unexpected_input)
     assert cli.main(["One task"]) == 0
     assert len(conversation) == 1
+
+
+def test_continue_restores_latest_workspace_session(conversation, monkeypatch, capsys):
+    enter_lines(monkeypatch, ["/exit"])
+    assert cli.main(["-i", "First question"]) == 0
+
+    enter_lines(monkeypatch, ["Follow up", "/exit"])
+    assert cli.main(["--continue"]) == 0
+
+    assert conversation[1] == [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Answer 1"}]},
+        {"role": "user", "content": "Follow up"},
+    ]
+    captured = capsys.readouterr()
+    assert "Session:" in captured.err
+    assert "Resumed session:" in captured.err
+
+
+def test_resume_specific_session(conversation, monkeypatch, capsys):
+    enter_lines(monkeypatch, ["/exit"])
+    assert cli.main(["-i", "Remember me"]) == 0
+    first_run = capsys.readouterr()
+    session_id = first_run.err.split("Session: ", 1)[1].splitlines()[0]
+
+    enter_lines(monkeypatch, ["Continue", "/exit"])
+    assert cli.main(["--resume", session_id]) == 0
+    assert conversation[1][0]["content"] == "Remember me"
+
+
+def test_no_persist_leaves_no_saved_session(conversation, monkeypatch, tmp_path):
+    enter_lines(monkeypatch, ["/exit"])
+    assert cli.main(["-i", "Private", "--no-persist"]) == 0
+    assert not (tmp_path / ".state").exists()
+
+
+def test_single_turn_does_not_create_session(conversation, tmp_path):
+    assert cli.main(["One task"]) == 0
+    assert not (tmp_path / ".state").exists()

@@ -35,6 +35,7 @@ DEFAULT_MAX_ITERATIONS = 8
 DEFAULT_MAX_FILE_CHARS = 100_000
 
 ModelRequest = Callable[..., ModelResponse]
+HistoryEvent = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ def run_agent(
     permission_gate: PermissionGate | None = None,
     history: list[dict[str, Any]] | None = None,
     on_text: TextCallback | None = None,
+    on_history_event: HistoryEvent | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -106,7 +108,10 @@ def run_agent(
     request = request or create_message
     permission_gate = permission_gate or PermissionGate()
     messages = history if history is not None else []
-    messages.append({"role": "user", "content": prompt})
+    user_message = {"role": "user", "content": prompt}
+    messages.append(user_message)
+    if on_history_event is not None:
+        on_history_event("message", user_message)
 
     for _ in range(max_iterations):
         chunks: list[str] = []
@@ -127,12 +132,13 @@ def run_agent(
             with protect_cleanup():
                 partial_text = "".join(chunks)
                 if partial_text.strip():
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": partial_text}],
-                        }
-                    )
+                    partial_message = {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": partial_text}],
+                    }
+                    messages.append(partial_message)
+                    if on_history_event is not None:
+                        on_history_event("message", partial_message)
             raise
         finally:
             if on_text is not None and chunks and not "".join(chunks).endswith("\n"):
@@ -147,16 +153,17 @@ def run_agent(
                     "The model output was truncated before producing text."
                 )
             # Incomplete tool calls must not enter the next request's history.
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": block.text}
-                        for block in response.content
-                        if isinstance(block, TextBlock)
-                    ],
-                }
-            )
+            truncated_message = {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": block.text}
+                    for block in response.content
+                    if isinstance(block, TextBlock)
+                ],
+            }
+            messages.append(truncated_message)
+            if on_history_event is not None:
+                on_history_event("message", truncated_message)
             return AgentResponse(text=text, truncated=True)
 
         if response.stop_reason == "end_turn":
@@ -164,9 +171,13 @@ def run_agent(
                 raise ModelError("The model ended while requesting a tool.")
             if not text.strip():
                 raise ModelError("The model returned no text.")
-            messages.append(
-                {"role": "assistant", "content": _assistant_content(response)}
-            )
+            final_message = {
+                "role": "assistant",
+                "content": _assistant_content(response),
+            }
+            messages.append(final_message)
+            if on_history_event is not None:
+                on_history_event("message", final_message)
             return AgentResponse(text=text)
 
         if response.stop_reason != "tool_use":
@@ -189,6 +200,8 @@ def run_agent(
         executing = False
         try:
             messages.append(assistant_message)
+            if on_history_event is not None:
+                on_history_event("message", assistant_message)
             for call in tool_calls:
                 active_call = call.id
                 executing = False
@@ -206,14 +219,15 @@ def run_agent(
                         f"{permission.reason}",
                         is_error=True,
                     )
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "content": result.content,
-                        "is_error": result.is_error,
-                    }
-                )
+                result_block = {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": result.content,
+                    "is_error": result.is_error,
+                }
+                results.append(result_block)
+                if on_history_event is not None:
+                    on_history_event("tool_result", result_block)
             messages.append(result_message)
         except KeyboardInterrupt as exc:
             with protect_cleanup():
@@ -229,14 +243,15 @@ def run_agent(
                             else "Tool interrupted by the user. It may have partially "
                             "executed; inspect the workspace before retrying."
                         )
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": call.id,
-                            "content": detail,
-                            "is_error": True,
-                        }
-                    )
+                    result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "content": detail,
+                        "is_error": True,
+                    }
+                    results.append(result_block)
+                    if on_history_event is not None:
+                        on_history_event("tool_result", result_block)
                 if messages[-1] is assistant_message:
                     messages.append(result_message)
             raise

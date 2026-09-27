@@ -488,3 +488,35 @@ def test_cancelled_tool_batch_keeps_results_and_skips_remaining_calls(
         == "Continued"
     )
     assert len(history) == 5
+
+
+def test_agent_emits_durable_history_events_before_and_after_tool(config, tmp_path):
+    events = []
+    responses = iter(
+        [
+            ModelResponse(
+                (ToolUseBlock("read", "read_file", {"path": "notes.txt"}),),
+                "tool_use",
+            ),
+            ModelResponse((TextBlock("Done"),), "end_turn"),
+        ]
+    )
+    (tmp_path / "notes.txt").write_text("saved", encoding="utf-8")
+
+    result = run_agent(
+        "Read it",
+        config,
+        workspace=tmp_path,
+        request=lambda *args, **kwargs: next(responses),
+        on_history_event=lambda kind, payload: events.append((kind, payload)),
+    )
+
+    assert result.text == "Done"
+    assert [kind for kind, _ in events] == [
+        "message",
+        "message",
+        "tool_result",
+        "message",
+    ]
+    assert events[1][1]["content"][0]["id"] == "read"
+    assert events[2][1]["content"] == "saved"
