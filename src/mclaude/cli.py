@@ -17,6 +17,7 @@ from mclaude.context import (
     load_project_instructions,
 )
 from mclaude.hooks import HookError, HookRunner
+from mclaude.mcp import MCPError, MCPRegistry
 from mclaude.permissions import PermissionGate, PermissionRequest
 from mclaude.provider import ModelError
 from mclaude.session import Session, SessionError, SessionStore
@@ -47,6 +48,7 @@ def _run_conversation(
     session: Session | None = None,
     planning: bool = False,
     hooks: HookRunner | None = None,
+    mcp: MCPRegistry | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
     history: list[dict[str, Any]] = session.history if session is not None else []
@@ -94,6 +96,8 @@ def _run_conversation(
                 continue
             if prompt.strip().casefold() in {"/plan", "/execute"}:
                 planning = prompt.strip().casefold() == "/plan"
+                if planning and mcp is not None:
+                    mcp.close()
                 print(
                     f"Mode: {'planning' if planning else 'execution'}", file=sys.stderr
                 )
@@ -118,6 +122,7 @@ def _run_conversation(
                 task_board=task_board,
                 planning=planning,
                 hooks=hooks,
+                mcp=mcp,
                 on_text=display_text,
                 on_history_event=record_history_event if session is not None else None,
             )
@@ -160,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
     )
     parser.add_argument("prompt", nargs="?", help="Question to send to the model")
+    parser.add_argument(
+        "--mcp-config", type=Path, help="Enable stdio MCP servers from JSON"
+    )
     parser.add_argument(
         "--hooks", type=Path, help="Explicitly enable hooks from a JSON file"
     )
@@ -289,7 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     session: Session | None = None
     try:
         hooks = HookRunner.from_file(args.hooks) if args.hooks else None
-    except HookError as exc:
+        mcp = (
+            MCPRegistry.from_file(args.mcp_config, Path.cwd())
+            if args.mcp_config
+            else None
+        )
+    except (HookError, MCPError) as exc:
         parser.error(str(exc))
     try:
         if interactive and not args.no_persist:
@@ -319,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
                 session=session,
                 planning=args.plan,
                 hooks=hooks,
+                mcp=mcp,
             )
         except KeyboardInterrupt:
             print("\nRequest interrupted.", file=sys.stderr)
@@ -327,5 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if mcp is not None:
+            mcp.close()
         if session is not None:
             session.close()

@@ -19,6 +19,7 @@ class PermissionRequest:
 
     tool_name: str
     tool_input: object
+    external: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ COMMAND_TOOLS = frozenset({"run_command"})
 
 def default_permission_policy(request: PermissionRequest) -> PermissionDecision:
     """Allow known read-only tools and reject everything else."""
+    if request.external:
+        return PermissionDecision(
+            PermissionAction.ASK, "External MCP tool; side effects are not trusted."
+        )
     if request.tool_name in READ_ONLY_TOOLS or request.tool_name == "update_tasks":
         return PermissionDecision(
             PermissionAction.ALLOW, "Known read-only workspace tool."

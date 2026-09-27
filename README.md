@@ -110,8 +110,6 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 `uv run mclaude --plan "分析项目并制定修改计划"` 只提供读取和搜索类工具。运行时也会拦截模型发出的修改、检查点恢复、任务更新和命令调用，即使自定义权限策略允许也不会执行。交互输入 `/plan`、`/execute` 切换模式；恢复会话时由本次启动的 `--plan` 决定模式。
 
-## 开发检查
-
 ## 生命周期 Hooks
 
 通过 `--hooks path/to/hooks.json` 显式启用受信任的本地程序。配置示例：
@@ -122,10 +120,23 @@ Agent 通过 `create_file` 或 `replace_text` 修改文件前后，会在本地�
 
 `tools` 默认为 `["*"]`，匹配工具全名；`command` 是 argv 数组，不经过 shell。Hook 从 stdin 接收 JSON（`event`、`tool_name`、`tool_input`；after 还含 `result`），stdout 返回 JSON：before 可返回 `{"block": true, "reason": "原因"}` 阻止工具，after 可返回 `{"append": "补充说明"}`；空输出等同 `{}`。权限通过后才运行 before；被拒工具不触发 Hook。before 失败时工具不会执行，after 失败则保留已有结果并标记错误，不会撤销或重跑工具。默认超时 10 秒，可设置到 60 秒；输出上限 16 KiB，超时与取消清理进程树。Hook 具有普通本地程序权限，规划模式完全禁用 Hooks。
 
-## 开发检查
+## 按需技能
 
 技能位于工作区 `.mclaude/skills/<目录>/SKILL.md`。文件以 `---` 包围的元数据开头，要求 `name: lowercase-name` 与单行 `description: 简要说明`（支持普通文本或引号字符串），结束 `---` 后是正文。`--list-skills` 无需凭据即可查看描述和发现错误；模型仅在 `load_skill` 后获得正文。目录或文件符号链接被忽略，元数据最多 8,192 字符、目录最多 100 个技能、正文文件最多 100,000 字符。
 
+## stdio MCP
+
+使用 `--mcp-config path/to/mcp.json` 显式启用本地 MCP 服务，例如：
+
+```json
+{"mcpServers": {"demo": {"command": "python", "args": ["-u", "server.py"], "timeout": 30}}}
+```
+
+服务以 argv 启动，在工作区运行；显式配置意味着允许启动这些受信任程序。发现的工具命名为 `mcp_<服务名>_<工具名>`，每次调用经过现有权限询问与 Hooks；服务声明的只读提示不会免除权限检查。规划模式不启动 MCP，切到 `/plan` 时关闭现有连接。退出、超时、通信错误或取消时关闭连接并清理进程；不自动重试外部工具。
+
+实现 [MCP 2025-06-18 stdio 生命周期](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)、`tools/list` 分页和 `tools/call`；允许协商 2025-03-26、2024-11-05。只支持工具与文本/结构化 JSON 结果，非文本内容标记省略；不支持 HTTP、资源、提示模板、sampling 或 elicitation。服务名限 20 字符、工具名限 35 字符，仅字母、数字、下划线和连字符；最多 10 个服务、100 个工具。单条消息 1 MB，工具文本最多 100,000 字符，超出会截断并标错。Python 服务需使用 UTF-8 标准输入输出。
+
+## 开发检查
 
 ```powershell
 uv run ruff format --check .

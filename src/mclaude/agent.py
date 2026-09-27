@@ -17,6 +17,7 @@ from mclaude.context import (
     load_project_instructions,
 )
 from mclaude.hooks import HookRunner
+from mclaude.mcp import MCPError, MCPRegistry
 from mclaude.permissions import (
     READ_ONLY_TOOLS,
     PermissionAction,
@@ -121,6 +122,7 @@ def run_agent(
     task_board: TaskBoard | None = None,
     planning: bool = False,
     hooks: HookRunner | None = None,
+    mcp: MCPRegistry | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -142,6 +144,12 @@ def run_agent(
     task_board = task_board if task_board is not None else TaskBoard()
     skills = SkillCatalog(workspace)
     tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS, LOAD_SKILL_DEFINITION]
+    if mcp is not None and not planning:
+        try:
+            mcp.connect()
+        except (OSError, MCPError) as exc:
+            raise ModelError(f"MCP discovery failed: {exc}") from exc
+        tool_definitions.extend(mcp.definitions)
     if skills.skills:
         base_system_prompt += (
             "\nAvailable skills (load on demand):\n" + skills.summary()
@@ -284,7 +292,11 @@ def run_agent(
                     )
                 else:
                     permission = permission_gate.check(
-                        PermissionRequest(tool_name=call.name, tool_input=call.input)
+                        PermissionRequest(
+                            tool_name=call.name,
+                            tool_input=call.input,
+                            external=mcp is not None and call.name in mcp.routes,
+                        )
                     )
                 if permission.action is PermissionAction.ALLOW:
                     executing = True
@@ -296,6 +308,8 @@ def run_agent(
                             )
                         if call.name == "load_skill":
                             return skills.load(call.input)
+                        if mcp is not None and call.name in mcp.routes:
+                            return mcp.execute(call.name, call.input)
                         return _execute_tool(
                             call,
                             workspace,
