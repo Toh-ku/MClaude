@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     """Parse command-line options and run the application."""
     parser = argparse.ArgumentParser(
         prog="mclaude",
-        description="MClaude: a Python coding agent built incrementally.",
+        description="MClaude: a local-first Python coding agent for the terminal.",
         epilog="Set ANTHROPIC_API_KEY and ANTHROPIC_MODEL to run the agent.",
     )
     parser.add_argument(

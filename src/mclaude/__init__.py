@@ -1,1 +1,1 @@
-"""MClaude: an incremental Python coding agent."""
+"""MClaude: a local-first Python coding agent for the terminal."""

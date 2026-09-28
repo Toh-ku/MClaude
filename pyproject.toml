@@ -1,7 +1,7 @@
 [project]
 name = "mclaude"
 version = "0.1.0"
-description = "A Python coding agent built incrementally."
+description = "A local-first Python coding agent for the terminal."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
