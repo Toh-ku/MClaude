@@ -3,6 +3,9 @@
 import math
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+DEFAULT_API_BASE_URL = "https://api.anthropic.com"
 
 
 class ConfigurationError(ValueError):
@@ -17,12 +20,34 @@ class ModelConfig:
     timeout: float = 60.0
     request_retries: int = 2
     retry_delay: float = 0.5
+    base_url: str | None = field(
+        default_factory=lambda: os.environ.get("ANTHROPIC_BASE_URL", "").strip() or None
+    )
 
     def __post_init__(self) -> None:
         if not self.api_key.strip():
             raise ConfigurationError("Set ANTHROPIC_API_KEY before sending a request.")
         if not self.model.strip():
             raise ConfigurationError("Set ANTHROPIC_MODEL or pass --model.")
+        if self.base_url is not None:
+            try:
+                url = urlsplit(self.base_url)
+                valid = (
+                    url.scheme in {"http", "https"}
+                    and bool(url.hostname)
+                    and url.port != 0
+                    and url.username is None
+                    and url.password is None
+                    and not url.query
+                    and not url.fragment
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ConfigurationError(
+                    "API base URL must be an HTTP(S) URL without credentials, "
+                    "query parameters or fragments."
+                )
         if self.max_tokens <= 0:
             raise ConfigurationError("--max-tokens must be a positive integer.")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
@@ -46,14 +71,28 @@ class ModelConfig:
         timeout: float = 60.0,
         request_retries: int = 2,
         retry_delay: float = 0.5,
+        saved: dict[str, str] | None = None,
     ) -> "ModelConfig":
+        saved = saved or {}
         return cls(
-            api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+            api_key=(
+                os.environ.get("ANTHROPIC_API_KEY", "").strip()
+                or saved.get("api_key", "")
+            ),
             model=(
-                model if model is not None else os.environ.get("ANTHROPIC_MODEL", "")
+                model
+                if model is not None
+                else (
+                    os.environ.get("ANTHROPIC_MODEL", "").strip()
+                    or saved.get("model", "")
+                )
             ).strip(),
             max_tokens=max_tokens,
             timeout=timeout,
             request_retries=request_retries,
             retry_delay=retry_delay,
+            base_url=(
+                os.environ.get("ANTHROPIC_BASE_URL", saved.get("base_url", "")).strip()
+                or None
+            ),
         )

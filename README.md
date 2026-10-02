@@ -23,29 +23,34 @@ MClaude 是一个本地优先的 Python 命令行编程 Agent。它通过 Anthro
 git clone https://github.com/Toh-ku/MClaude.git
 Set-Location MClaude
 uv sync --locked
-Copy-Item .env.example .env
 ```
 
-编辑 `.env`，填入你有权使用的 API 密钥和模型 ID：
-
-```dotenv
-ANTHROPIC_API_KEY=your-api-key
-ANTHROPIC_MODEL=your-model-id
-```
-
-然后运行一个任务：
+直接启动：
 
 ```powershell
+uv run mclaude
+```
+
+首次在交互终端运行且缺少 API Key 或模型配置时，程序会引导你输入 API Key
+（隐藏输入）、模型 ID 和可选 API 地址，保存后继续当前任务。API 地址留空使用官方 API。
+配置保存在用户目录中，切换项目无需重复配置。
+
+也可以先登录，再运行一个任务：
+
+```powershell
+uv run mclaude login
 uv run mclaude "读取这个项目并总结其结构"
 ```
 
-`ANTHROPIC_MODEL` 没有内置默认值，必须通过环境变量或 `--model` 显式指定。
-`.env` 只在本地使用并已被 Git 忽略；不要提交真实密钥。
+模型没有内置默认值，需要在登录时填写，或通过环境变量、`--model` 指定。
+这里的登录是本地 API 凭据配置；保存时不请求 API，凭据有效性在首次模型调用时验证。
 
 ## 常用命令
 
 | 目的 | 命令 |
 | --- | --- |
+| 登录 / 重新配置 | `uv run mclaude login` |
+| 登出 | `uv run mclaude logout` |
 | 单次任务 | `uv run mclaude "你的任务"` |
 | 交互会话 | `uv run mclaude` 或 `uv run mclaude -i` |
 | 恢复最近会话 | `uv run mclaude --continue` |
@@ -68,12 +73,36 @@ uv run mclaude "读取这个项目并总结其结构"
 
 ## 配置
 
+登录配置文件的位置：
+
+- Windows：`%LOCALAPPDATA%\MClaude\config.json`
+- Linux/macOS：`$XDG_CONFIG_HOME/mclaude/config.json` 或 `~/.config/mclaude/config.json`
+- 可通过 `MCLAUDE_CONFIG_DIR` 指定配置目录，与 `MCLAUDE_STATE_DIR` 独立。
+
+API Key 以明文保存在用户级配置文件中，请勿分享或提交此文件。POSIX 系统上新建配置目录
+权限为 `0700`，配置文件权限为 `0600`。登录中按 `Ctrl+C` 会取消，保留已有配置。
+`login --model MODEL --base-url URL` 可设置输入提示的默认值；API Key 始终隐藏输入。
+
+`logout` 删除保存的登录配置，保留会话和编辑检查点。环境变量和显式指定的 `.env`
+属于独立配置来源，登出不会删除或修改它们；如已设置，它们仍可用于运行。
+
+配置覆盖顺序为：`--model` > 环境变量 > 显式指定的 `.env` > 保存的登录配置。
+API Key 和模型的空环境变量视为未配置；空的 `ANTHROPIC_BASE_URL` 会选择官方 API。
+自动化环境不弹出登录输入框，缺少配置时会提示先运行 `mclaude login` 或设置环境变量。
+
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | 是 | Anthropic API 密钥 |
-| `ANTHROPIC_MODEL` | 是 | 模型 ID，可被 `--model` 覆盖 |
+| `ANTHROPIC_API_KEY` | 否 | 覆盖已保存的 API 密钥；无登录配置时必需 |
+| `ANTHROPIC_MODEL` | 否 | 覆盖已保存的模型 ID，可被 `--model` 覆盖 |
 | `ANTHROPIC_BASE_URL` | 否 | Anthropic Messages API 兼容端点 |
+| `MCLAUDE_CONFIG_DIR` | 否 | 用户登录配置目录 |
 | `MCLAUDE_STATE_DIR` | 否 | 会话和编辑检查点的本地状态目录 |
+
+当前工作目录的 `.env` 不再自动读取。已有 `.env` 可通过显式参数继续使用：
+
+```powershell
+uv run mclaude --env-file .env "你的任务"
+```
 
 常用运行参数包括 `--max-tokens`、`--timeout`、`--request-retries`、
 `--max-iterations`、`--context-budget`、`--read-workers` 和

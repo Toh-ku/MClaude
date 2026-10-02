@@ -192,6 +192,22 @@ def test_tool_request_is_sent_and_normalized(api):
     assert json.loads(api["requests"][0].content)["tools"] == tools
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_saved_endpoint_reaches_both_sdk_clients(api, monkeypatch, streaming):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://environment.test")
+    config = ModelConfig(
+        api_key="saved-secret", model="saved-model", base_url="https://saved.test/api"
+    )
+    provider.create_message(
+        [{"role": "user", "content": "Hello"}],
+        config,
+        on_text=(lambda text: None) if streaming else None,
+    )
+    request = api["requests"][0]
+    assert str(request.url) == "https://saved.test/api/v1/messages"
+    assert request.headers["x-api-key"] == "saved-secret"
+
+
 def test_system_prompt_is_sent(api):
     provider.create_message(
         [{"role": "user", "content": "Hello"}],

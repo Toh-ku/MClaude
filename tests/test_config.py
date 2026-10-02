@@ -75,7 +75,7 @@ def test_cli_loads_dotenv_without_overriding_environment(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(cli, "run_agent", fake_agent)
 
-    assert cli.main(["Hello"]) == 0
+    assert cli.main(["Hello", "--env-file", str(tmp_path / ".env")]) == 0
     assert captured["config"].api_key == "dotenv-secret"
     assert captured["config"].model == "environment-model"
     assert capsys.readouterr().out == "ok\n"

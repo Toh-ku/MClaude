@@ -12,6 +12,8 @@ def clear_model_environment(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_LOG",
         "MCLAUDE_STATE_DIR",
+        "MCLAUDE_CONFIG_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MCLAUDE_STATE_DIR", str(tmp_path / ".mclaude-state"))
+    monkeypatch.setenv("MCLAUDE_CONFIG_DIR", str(tmp_path / ".mclaude-config"))

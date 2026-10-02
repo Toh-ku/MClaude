@@ -16,7 +16,7 @@ from anthropic import (
     AsyncAnthropic,
 )
 
-from mclaude.config import ModelConfig
+from mclaude.config import DEFAULT_API_BASE_URL, ModelConfig
 
 TextCallback = Callable[[str], None]
 
@@ -120,6 +120,7 @@ async def _stream_message(
         api_key=config.api_key,
         timeout=config.timeout,
         max_retries=0,
+        base_url=config.base_url or DEFAULT_API_BASE_URL,
     ) as client:
         async with client.messages.stream(**options) as stream:
             return await _consume_stream(stream, on_text)
@@ -148,6 +149,7 @@ def create_message(
                     api_key=config.api_key,
                     timeout=config.timeout,
                     max_retries=0,
+                    base_url=config.base_url or DEFAULT_API_BASE_URL,
                 ) as client:
                     message = client.messages.create(**options)
             else:
@@ -177,7 +179,10 @@ def create_message(
                 ) from exc
             explanations = {
                 400: "Invalid request; check the model and request parameters.",
-                401: "Authentication failed; check ANTHROPIC_API_KEY.",
+                401: (
+                    "Authentication failed; run 'mclaude login' to update saved "
+                    "credentials or check ANTHROPIC_API_KEY."
+                ),
                 403: "Access denied; check your API key permissions and model access.",
                 404: (
                     "Model or endpoint not found; check the model and "

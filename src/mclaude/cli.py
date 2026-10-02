@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from importlib.metadata import version
@@ -11,6 +12,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
+from mclaude.auth import ConfigStore, login
 from mclaude.config import ConfigurationError, ModelConfig
 from mclaude.context import (
     DEFAULT_CONTEXT_BUDGET_TOKENS,
@@ -200,12 +202,58 @@ def _run_conversation(
         prompt = None
 
 
+def _auth_command(argv: list[str]) -> int:
+    command = argv[0]
+    parser = argparse.ArgumentParser(
+        prog=f"mclaude {command}",
+        description=(
+            "Configure and save user-level API credentials."
+            if command == "login"
+            else "Remove saved API credentials (sessions are kept)."
+        ),
+    )
+    if command == "login":
+        parser.add_argument("--model", help="Default model ID in the login prompt")
+        parser.add_argument("--base-url", help="Default API URL in the login prompt")
+    args = parser.parse_args(argv[1:])
+    store = ConfigStore()
+    try:
+        if command == "login":
+            login(store, model=args.model, base_url=args.base_url)
+        else:
+            removed = store.logout()
+            print(
+                "Logged out: saved login configuration removed."
+                if removed
+                else "Already logged out: no saved login configuration.",
+                file=sys.stderr,
+            )
+            print(
+                "Environment variables and explicitly supplied --env-file "
+                "credentials remain independent of saved login.",
+                file=sys.stderr,
+            )
+    except ConfigurationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nLogin cancelled.", file=sys.stderr)
+        return 130
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse command-line options and run the application."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"login", "logout"}:
+        return _auth_command(argv)
     parser = argparse.ArgumentParser(
         prog="mclaude",
         description="MClaude: a local-first Python coding agent for the terminal.",
-        epilog="Set ANTHROPIC_API_KEY and ANTHROPIC_MODEL to run the agent.",
+        epilog=(
+            "Run 'mclaude login' to configure API access; 'mclaude logout' "
+            "removes saved credentials. Environment variables override saved login."
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {version('mclaude')}"
@@ -269,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Show project instruction sources for the current workspace and exit",
     )
     parser.add_argument("--model", help="Model ID (overrides ANTHROPIC_MODEL)")
+    parser.add_argument(
+        "--env-file", type=Path, help="Explicitly load a dotenv file (optional)"
+    )
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -350,17 +401,55 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--read-workers must be between 1 and 16.")
     if args.context_budget <= args.max_tokens:
         parser.error("--context-budget must be greater than --max-tokens.")
-    load_dotenv(Path.cwd() / ".env", override=False)
+    if args.env_file is not None:
+        if not args.env_file.is_file():
+            parser.error("--env-file must point to an existing file.")
+        try:
+            load_dotenv(args.env_file, override=False)
+        except (OSError, UnicodeError):
+            parser.error("Cannot read --env-file.")
+    request_options = {
+        "max_tokens": args.max_tokens,
+        "timeout": args.timeout,
+        "request_retries": args.request_retries,
+        "retry_delay": args.retry_delay,
+    }
     try:
+        # Validate command options before prompting for or saving credentials.
+        ModelConfig(
+            api_key="validation",
+            model=args.model if args.model is not None else "validation",
+            **request_options,
+        )
+        store = ConfigStore()
+        saved = store.load()
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or saved.get(
+            "api_key", ""
+        )
+        model = (
+            args.model
+            if args.model is not None
+            else os.environ.get("ANTHROPIC_MODEL", "").strip() or saved.get("model", "")
+        )
+        if not api_key.strip() or not model.strip():
+            print("API login configuration is incomplete.", file=sys.stderr)
+            saved = login(
+                store,
+                model=model.strip() or None,
+                base_url=os.environ.get(
+                    "ANTHROPIC_BASE_URL", saved.get("base_url", "")
+                ),
+            )
         config = ModelConfig.from_env(
             model=args.model,
-            max_tokens=args.max_tokens,
-            timeout=args.timeout,
-            request_retries=args.request_retries,
-            retry_delay=args.retry_delay,
+            saved=saved,
+            **request_options,
         )
     except ConfigurationError as exc:
         parser.error(str(exc))
+    except KeyboardInterrupt:
+        print("\nLogin cancelled.", file=sys.stderr)
+        return 130
     session: Session | None = None
     session_kind = "temporary"
     terminal_status: TerminalStatus | None = None
