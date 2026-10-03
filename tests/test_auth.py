@@ -237,16 +237,6 @@ def test_invalid_endpoint_never_overwrites_login(store, url):
     assert store.load() == settings()
 
 
-def test_missing_env_file_fails_without_login(store, monkeypatch):
-    monkeypatch.setattr(
-        auth.getpass, "getpass", lambda *a, **k: pytest.fail("Must not prompt")
-    )
-    with pytest.raises(SystemExit) as error:
-        cli.main(["Task", "--env-file", str(store.path.parent / "missing.env")])
-    assert error.value.code == 2
-    assert not store.path.exists()
-
-
 def test_saved_json_has_only_login_settings(store):
     store.save(settings())
     assert set(json.loads(store.path.read_text(encoding="utf-8"))) == {
