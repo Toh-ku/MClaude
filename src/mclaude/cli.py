@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--plain",
         action="store_true",
-        help="Disable the interactive terminal status page",
+        help="Disable the interactive terminal dashboard",
     )
     parser.add_argument(
         "--show-instructions",
@@ -513,12 +513,18 @@ def main(argv: list[str] | None = None) -> int:
                 terminal_status=terminal_status,
             )
         except KeyboardInterrupt:
+            if terminal_status is not None:
+                terminal_status.close()
             print("\nRequest interrupted.", file=sys.stderr)
             return 130
     except SessionError as exc:
+        if terminal_status is not None:
+            terminal_status.close()
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if terminal_status is not None:
+            terminal_status.close()
         if mcp is not None:
             mcp.close()
         if session is not None:
