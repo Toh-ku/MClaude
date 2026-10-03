@@ -9,8 +9,6 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 from mclaude.agent import DEFAULT_MAX_ITERATIONS, run_agent
 from mclaude.auth import ConfigStore, login
 from mclaude.config import ConfigurationError, ModelConfig
@@ -229,8 +227,7 @@ def _auth_command(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             print(
-                "Environment variables and explicitly supplied --env-file "
-                "credentials remain independent of saved login.",
+                "Environment variables remain independent of saved login.",
                 file=sys.stderr,
             )
     except ConfigurationError as exc:
@@ -318,9 +315,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--model", help="Model ID (overrides ANTHROPIC_MODEL)")
     parser.add_argument(
-        "--env-file", type=Path, help="Explicitly load a dotenv file (optional)"
-    )
-    parser.add_argument(
         "--max-tokens",
         type=int,
         default=1024,
@@ -401,13 +395,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--read-workers must be between 1 and 16.")
     if args.context_budget <= args.max_tokens:
         parser.error("--context-budget must be greater than --max-tokens.")
-    if args.env_file is not None:
-        if not args.env_file.is_file():
-            parser.error("--env-file must point to an existing file.")
-        try:
-            load_dotenv(args.env_file, override=False)
-        except (OSError, UnicodeError):
-            parser.error("Cannot read --env-file.")
     request_options = {
         "max_tokens": args.max_tokens,
         "timeout": args.timeout,

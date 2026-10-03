@@ -15,7 +15,6 @@ dist/
 # Local configuration and credentials
 .env
 .env.*
-!.env.example
 
 # Editors and operating systems
 .idea/

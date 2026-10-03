@@ -83,10 +83,10 @@ API Key 以明文保存在用户级配置文件中，请勿分享或提交此文
 权限为 `0700`，配置文件权限为 `0600`。登录中按 `Ctrl+C` 会取消，保留已有配置。
 `login --model MODEL --base-url URL` 可设置输入提示的默认值；API Key 始终隐藏输入。
 
-`logout` 删除保存的登录配置，保留会话和编辑检查点。环境变量和显式指定的 `.env`
-属于独立配置来源，登出不会删除或修改它们；如已设置，它们仍可用于运行。
+`logout` 删除保存的登录配置，保留会话和编辑检查点。环境变量属于独立配置来源，
+登出不会删除或修改它们；如已设置，它们仍可用于运行。
 
-配置覆盖顺序为：`--model` > 环境变量 > 显式指定的 `.env` > 保存的登录配置。
+配置覆盖顺序为：`--model` > 环境变量 > 保存的登录配置。
 API Key 和模型的空环境变量视为未配置；空的 `ANTHROPIC_BASE_URL` 会选择官方 API。
 自动化环境不弹出登录输入框，缺少配置时会提示先运行 `mclaude login` 或设置环境变量。
 
@@ -97,12 +97,6 @@ API Key 和模型的空环境变量视为未配置；空的 `ANTHROPIC_BASE_URL`
 | `ANTHROPIC_BASE_URL` | 否 | Anthropic Messages API 兼容端点 |
 | `MCLAUDE_CONFIG_DIR` | 否 | 用户登录配置目录 |
 | `MCLAUDE_STATE_DIR` | 否 | 会话和编辑检查点的本地状态目录 |
-
-当前工作目录的 `.env` 不再自动读取。已有 `.env` 可通过显式参数继续使用：
-
-```powershell
-uv run mclaude --env-file .env "你的任务"
-```
 
 常用运行参数包括 `--max-tokens`、`--timeout`、`--request-retries`、
 `--max-iterations`、`--context-budget`、`--read-workers` 和
