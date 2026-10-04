@@ -23,3 +23,9 @@ dist/
 Thumbs.db
 
 docs/
+
+# Official website source and local publishing artifacts
+!website/dist/
+!website/dist/**
+website/.sites-publish/
+website/*.tar.gz
