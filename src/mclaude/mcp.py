@@ -1,4 +1,4 @@
-"""Small stdio MCP client: lifecycle, paginated discovery and bounded tool calls."""
+"""MCP clients for stdio and Streamable HTTP tool servers."""
 
 import json
 import math
@@ -8,9 +8,12 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx2
 
 from mclaude.cancellation import protect_cleanup
 from mclaude.tools import ToolResult, _terminate_process_tree
@@ -27,8 +30,10 @@ class MCPError(RuntimeError):
 @dataclass(frozen=True)
 class ServerConfig:
     name: str
-    command: tuple[str, ...]
+    command: tuple[str, ...] = ()
     timeout: float = 30.0
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 class StdioClient:
@@ -190,13 +195,211 @@ class StdioClient:
                     stream.close()
 
 
+class HttpClient:
+    """Sequential MCP Streamable HTTP client; tool calls are never replayed."""
+
+    def __init__(self, config: ServerConfig):
+        self.config = config
+        self.sequence = 0
+        self.closed = False
+        self.session_id: str | None = None
+        self.protocol_version: str | None = None
+        self.http = httpx2.Client(timeout=config.timeout, follow_redirects=False)
+        try:
+            result = self.request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "mclaude", "version": "0.1.0"},
+                },
+            )
+            version = result.get("protocolVersion")
+            if version not in SUPPORTED_VERSIONS or version == "2024-11-05":
+                raise MCPError("Unsupported MCP Streamable HTTP protocol version.")
+            if (
+                not isinstance(result.get("capabilities"), dict)
+                or "tools" not in result["capabilities"]
+            ):
+                raise MCPError("MCP server does not support tools.")
+            self.protocol_version = version
+            try:
+                self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            except (httpx2.HTTPError, ValueError, UnicodeError) as exc:
+                raise MCPError(
+                    "MCP HTTP stream failed or contained invalid data."
+                ) from exc
+        except BaseException:
+            self.close()
+            raise
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            **self.config.headers,
+        }
+        if self.session_id is not None:
+            headers["Mcp-Session-Id"] = self.session_id
+        if self.protocol_version is not None:
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        return headers
+
+    def _message(self, raw: bytes) -> dict:
+        if len(raw) > MAX_MESSAGE_BYTES:
+            raise MCPError("MCP response exceeds the size limit.")
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
+            raise MCPError("Invalid MCP JSON-RPC message.")
+        return value
+
+    def _server_request(self, message: dict) -> None:
+        if "method" not in message or "id" not in message:
+            return
+        response = {"jsonrpc": "2.0", "id": message["id"]}
+        if message["method"] == "ping":
+            response["result"] = {}
+        else:
+            response["error"] = {
+                "code": -32601,
+                "message": "Unsupported client method",
+            }
+        self._post(response)
+
+    def _post(self, message: dict) -> dict | None:
+        raw = json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(raw) > MAX_MESSAGE_BYTES:
+            raise MCPError("MCP request exceeds the size limit.")
+        deadline = time.monotonic() + self.config.timeout
+        with self.http.stream(
+            "POST", self.config.url, content=raw, headers=self._headers()
+        ) as response:
+            if response.status_code >= 400 or response.is_redirect:
+                raise MCPError(
+                    f"MCP HTTP request failed (status {response.status_code})."
+                )
+            if message.get("method") == "initialize":
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id is not None:
+                    if not session_id or any(
+                        not 33 <= ord(c) <= 126 for c in session_id
+                    ):
+                        raise MCPError("Invalid MCP session ID.")
+                    self.session_id = session_id
+            if "id" not in message or "method" not in message:
+                if response.status_code != 202:
+                    raise MCPError("MCP notification was not accepted.")
+                return None
+            content_type = (
+                response.headers.get("content-type", "").split(";", 1)[0].lower()
+            )
+            if response.status_code != 200 or content_type not in {
+                "application/json",
+                "text/event-stream",
+            }:
+                raise MCPError("Invalid MCP HTTP response type or status.")
+            if content_type == "application/json":
+                body = bytearray()
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    body.extend(chunk)
+                    if len(body) > MAX_MESSAGE_BYTES:
+                        raise MCPError("MCP response exceeds the size limit.")
+                    if time.monotonic() >= deadline:
+                        raise MCPError(
+                            "MCP request timed out; side effects may be partial."
+                        )
+                result = self._response(self._message(body), message["id"])
+                if result is None:
+                    raise MCPError("MCP HTTP response did not answer the request.")
+                return result
+            return self._stream_response(response, message["id"], deadline)
+
+    def _response(self, value: dict, request_id: int) -> dict | None:
+        if "method" in value:
+            self._server_request(value)
+            return None
+        if value.get("id") != request_id or isinstance(value.get("id"), bool):
+            raise MCPError("MCP response ID does not match the request.")
+        if "error" in value:
+            raise MCPError("MCP server returned a JSON-RPC error.")
+        result = value.get("result")
+        if not isinstance(result, dict):
+            raise MCPError("Invalid MCP response result.")
+        return result
+
+    def _stream_response(
+        self, response: httpx2.Response, request_id: int, deadline: float
+    ) -> dict:
+        pending = bytearray()
+        data: list[bytes] = []
+        for chunk in response.iter_bytes(chunk_size=8192):
+            if time.monotonic() >= deadline:
+                raise MCPError("MCP request timed out; side effects may be partial.")
+            pending.extend(chunk)
+            if len(pending) + sum(map(len, data)) > MAX_MESSAGE_BYTES:
+                raise MCPError("MCP SSE event exceeds the size limit.")
+            while b"\n" in pending:
+                line, _, remainder = pending.partition(b"\n")
+                pending = bytearray(remainder)
+                line = line.rstrip(b"\r")
+                if not line:
+                    if data:
+                        value = self._message(b"\n".join(data))
+                        data.clear()
+                        result = self._response(value, request_id)
+                        if result is not None:
+                            return result
+                elif line.startswith(b"data:"):
+                    data.append(line[5:].lstrip(b" "))
+        if data:
+            result = self._response(self._message(b"\n".join(data)), request_id)
+            if result is not None:
+                return result
+        raise MCPError("MCP SSE stream ended before the response.")
+
+    def request(self, method: str, params: dict) -> dict:
+        if self.closed:
+            raise MCPError("MCP connection is closed.")
+        self.sequence += 1
+        try:
+            result = self._post(
+                {
+                    "jsonrpc": "2.0",
+                    "id": self.sequence,
+                    "method": method,
+                    "params": params,
+                }
+            )
+            if result is None:
+                raise MCPError("MCP HTTP response did not answer the request.")
+            return result
+        except (httpx2.HTTPError, ValueError, UnicodeError) as exc:
+            self.close()
+            raise MCPError("MCP HTTP stream failed or contained invalid data.") from exc
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        with protect_cleanup():
+            if self.session_id is not None:
+                try:
+                    self.http.delete(self.config.url, headers=self._headers())
+                except httpx2.HTTPError:
+                    pass
+            self.http.close()
+
+
 class MCPRegistry:
     def __init__(self, configs: tuple[ServerConfig, ...], workspace: Path):
         self.configs = configs
         self.workspace = workspace
-        self.clients: list[StdioClient] = []
+        self.clients: list[StdioClient | HttpClient] = []
         self.definitions: list[dict[str, Any]] = []
-        self.routes: dict[str, tuple[StdioClient, str]] = {}
+        self.routes: dict[str, tuple[StdioClient | HttpClient, str]] = {}
         self.connected = False
 
     @classmethod
@@ -219,18 +422,12 @@ class MCPRegistry:
                 if not isinstance(entry, dict) or set(entry) - {
                     "command",
                     "args",
+                    "url",
+                    "headers",
                     "timeout",
                 }:
                     raise ValueError("Invalid MCP server entry.")
-                command, args = entry.get("command"), entry.get("args", [])
                 timeout = entry.get("timeout", 30)
-                if (
-                    not isinstance(command, str)
-                    or not command
-                    or not isinstance(args, list)
-                    or not all(isinstance(a, str) for a in args)
-                ):
-                    raise ValueError("MCP command must be a string and args an array.")
                 if (
                     isinstance(timeout, bool)
                     or not isinstance(timeout, (int, float))
@@ -238,7 +435,78 @@ class MCPRegistry:
                     or not 0 < timeout <= 600
                 ):
                     raise ValueError("MCP timeout must be in (0, 600] seconds.")
-                configs.append(ServerConfig(name, (command, *args), float(timeout)))
+                if ("command" in entry) == ("url" in entry):
+                    raise ValueError("MCP server needs exactly one of command or url.")
+                if "command" in entry:
+                    command, args = entry["command"], entry.get("args", [])
+                    if (
+                        not isinstance(command, str)
+                        or not command
+                        or not isinstance(args, list)
+                        or not all(isinstance(a, str) for a in args)
+                        or "headers" in entry
+                    ):
+                        raise ValueError("Invalid stdio MCP command or args.")
+                    configs.append(ServerConfig(name, (command, *args), float(timeout)))
+                else:
+                    url, headers = entry["url"], entry.get("headers", {})
+                    if "args" in entry or not isinstance(url, str):
+                        raise ValueError("Invalid HTTP MCP server entry.")
+                    parsed = urlsplit(url)
+                    # Accessing port also rejects malformed authorities such as :abc.
+                    port = parsed.port
+                    if (
+                        parsed.scheme not in {"http", "https"}
+                        or not parsed.hostname
+                        or (port is not None and port == 0)
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or parsed.fragment
+                    ):
+                        raise ValueError(
+                            "MCP URL must be HTTP(S) without credentials or fragment."
+                        )
+                    if not isinstance(headers, dict):
+                        raise ValueError("MCP headers must be an object.")
+                    clean_headers = {}
+                    reserved = {
+                        "accept",
+                        "content-type",
+                        "host",
+                        "origin",
+                        "mcp-session-id",
+                        "mcp-protocol-version",
+                    }
+                    for key, value in headers.items():
+                        if (
+                            not isinstance(key, str)
+                            or not re.fullmatch(r"[A-Za-z0-9-]+", key)
+                            or key.lower() in reserved
+                            or not isinstance(value, str)
+                        ):
+                            raise ValueError("Invalid MCP HTTP header.")
+
+                        def substitute(match: re.Match) -> str:
+                            variable = match.group(1)
+                            if variable not in os.environ:
+                                raise ValueError(
+                                    f"MCP header variable {variable} is not set."
+                                )
+                            return os.environ[variable]
+
+                        resolved = re.sub(
+                            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", substitute, value
+                        )
+                        if len(resolved) > 8192 or any(
+                            ord(c) < 32 or ord(c) == 127 for c in resolved
+                        ):
+                            raise ValueError("Invalid MCP HTTP header value.")
+                        clean_headers[key] = resolved
+                    configs.append(
+                        ServerConfig(
+                            name, timeout=float(timeout), url=url, headers=clean_headers
+                        )
+                    )
             return cls(tuple(configs), workspace)
         except (OSError, ValueError) as exc:
             raise MCPError(f"Cannot load MCP configuration: {exc}") from exc
@@ -248,7 +516,11 @@ class MCPRegistry:
             return
         try:
             for config in self.configs:
-                client = StdioClient(config, self.workspace)
+                client = (
+                    HttpClient(config)
+                    if config.url
+                    else StdioClient(config, self.workspace)
+                )
                 self.clients.append(client)
                 cursor = None
                 cursors = set()

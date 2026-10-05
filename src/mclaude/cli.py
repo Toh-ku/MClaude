@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Total delegated model requests per turn (0-32; default: 8)",
     )
     parser.add_argument(
-        "--mcp-config", type=Path, help="Enable stdio MCP servers from JSON"
+        "--mcp-config", type=Path, help="Enable stdio or HTTP MCP servers from JSON"
     )
     parser.add_argument(
         "--hooks", type=Path, help="Explicitly enable hooks from a JSON file"

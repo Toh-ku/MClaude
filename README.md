@@ -12,7 +12,7 @@ MClaude 是一个本地优先的 Python 命令行编程 Agent。它通过 Anthro
 - 命令执行、编辑检查点与冲突检测
 - 只读规划模式、任务跟踪和自动上下文压缩
 - 分层加载 `AGENTS.md` / `CLAUDE.md` 项目规则
-- 按需技能、生命周期 Hooks、stdio MCP 和只读子 Agent
+- 按需技能、生命周期 Hooks、stdio/远程 HTTP MCP 和只读子 Agent
 - 只读工具并发调度，以及实时刷新的交互式终端仪表盘
 
 ## 快速开始
@@ -128,8 +128,26 @@ uv run mclaude --hooks path/to/hooks.json
 uv run mclaude --mcp-config path/to/mcp.json
 ```
 
-Hooks 是受信任的本地程序；MCP 当前支持 stdio 传输与工具调用。规划模式不会运行
-Hooks 或启动 MCP 服务。配置格式和所有限制可通过源码及测试中的示例确认：
+Hooks 是受信任的本地程序；MCP 支持本地 stdio 和远程 Streamable HTTP 工具服务。
+例如 `mcp.json` 可以同时配置两种服务：
+
+```json
+{
+  "mcpServers": {
+    "local": {"command": "python", "args": ["server.py"]},
+    "remote": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+      "timeout": 30
+    }
+  }
+}
+```
+
+远程服务使用 Streamable HTTP，支持 JSON 与 SSE 响应、会话 ID 和协议版本头。
+`headers` 中的 `${变量名}` 从环境变量读取；令牌不要直接写入配置文件。
+建议远程地址使用 HTTPS。当前不支持旧版 HTTP+SSE 传输或 OAuth 自动登录。
+规划模式不会运行 Hooks 或连接 MCP 服务。配置格式和所有限制可通过源码及测试中的示例确认：
 `src/mclaude/hooks.py`、`src/mclaude/mcp.py`、`tests/test_hooks.py` 和
 `tests/test_mcp.py`。
 
