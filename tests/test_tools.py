@@ -93,15 +93,37 @@ def test_find_files_uses_globs_and_skips_git_metadata(tmp_path: Path) -> None:
     assert python_files.content.splitlines() == ["root.py", "sub/code.py"]
 
 
-def test_workspace_search_does_not_apply_gitignore_rules(tmp_path: Path) -> None:
-    (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+def test_workspace_search_applies_gitignore_rules(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("ignored.py\nbuild/\n", encoding="utf-8")
     (tmp_path / "ignored.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "output.py").write_text("needle\n", encoding="utf-8")
 
     files = find_files({"pattern": "**/*.py"}, tmp_path)
     matches = search_text({"query": "needle"}, tmp_path)
+    ignored_scope = search_text({"query": "needle", "path": "ignored.py"}, tmp_path)
 
-    assert files.content == "ignored.py"
-    assert matches.content == "ignored.py:1:needle"
+    assert files.content == "visible.py"
+    assert matches.content == "visible.py:1:needle"
+    assert ignored_scope.content == "No matches found for: needle"
+
+
+def test_workspace_search_applies_nested_gitignore_and_negation(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    (tmp_path / "root.tmp").write_text("needle\n", encoding="utf-8")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / ".gitignore").write_text("!keep.tmp\nlocal.py\n", encoding="utf-8")
+    (source / "keep.tmp").write_text("needle\n", encoding="utf-8")
+    (source / "other.tmp").write_text("needle\n", encoding="utf-8")
+    (source / "local.py").write_text("needle\n", encoding="utf-8")
+
+    files = find_files({"pattern": "*.tmp"}, tmp_path)
+    matches = search_text({"query": "needle"}, tmp_path)
+
+    assert files.content == "src/keep.tmp"
+    assert matches.content == "src/keep.tmp:1:needle"
 
 
 def test_find_files_bounds_results_and_validates_input(tmp_path: Path) -> None:

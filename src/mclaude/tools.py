@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from pathspec import PathSpec
+from pathspec import GitIgnoreSpec, PathSpec
 
 from mclaude.cancellation import TurnCancelled, check_read_cancelled, protect_cleanup
 from mclaude.checkpoints import CheckpointError, CheckpointStore
@@ -213,10 +213,18 @@ def _resolve_in_workspace(path_value: str, workspace: Path) -> Path | None:
 
 
 def _workspace_files(workspace: Path):
-    """Yield safe workspace files in stable path order."""
+    """Yield safe workspace files in stable path order, honoring .gitignore."""
 
-    def walk(directory: Path):
+    def walk(directory: Path, rules: tuple[tuple[Path, GitIgnoreSpec], ...]):
         check_read_cancelled()
+        ignore_file = directory / ".gitignore"
+        try:
+            if ignore_file.is_file() and not ignore_file.is_symlink():
+                lines = ignore_file.read_text(encoding="utf-8").splitlines()
+                rules = (*rules, (directory, GitIgnoreSpec.from_lines(lines)))
+        except (OSError, UnicodeError):
+            # An unreadable ignore file must not make its directory searchable.
+            return
         try:
             entries = sorted(
                 directory.iterdir(), key=lambda entry: entry.name.casefold()
@@ -234,13 +242,21 @@ def _workspace_files(workspace: Path):
                 continue
             if not resolved.is_relative_to(workspace):
                 continue
+            ignored = False
+            for base, spec in rules:
+                relative = entry.relative_to(base).as_posix()
+                result = spec.check_file(relative + ("/" if is_dir else ""))
+                if result.include is not None:
+                    ignored = result.include
+            if ignored:
+                continue
             if is_dir:
                 if not entry.is_symlink():
-                    yield from walk(entry)
+                    yield from walk(entry, rules)
             elif entry.is_file():
                 yield entry
 
-    yield from walk(workspace)
+    yield from walk(workspace, ())
 
 
 def _display_path(path: Path, workspace: Path) -> str:
