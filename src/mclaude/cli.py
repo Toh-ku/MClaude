@@ -53,6 +53,7 @@ def _run_conversation(
     mcp: MCPRegistry | None = None,
     subagent_budget: int = 8,
     read_workers: int = 4,
+    allow_host_commands: bool = False,
     terminal_status: TerminalStatus | None = None,
 ) -> int:
     """Run one task or read successive turns using a shared message history."""
@@ -145,6 +146,7 @@ def _run_conversation(
                 mcp=mcp,
                 subagent_budget=subagent_budget,
                 read_workers=read_workers,
+                allow_host_commands=allow_host_commands,
                 on_text=display_text,
                 on_history_event=(
                     record_history_event
@@ -239,11 +241,51 @@ def _auth_command(argv: list[str]) -> int:
     return 0
 
 
+def _sessions_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="mclaude sessions", description="Inspect saved sessions in this workspace."
+    )
+    commands = parser.add_subparsers(dest="action", required=True)
+    commands.add_parser("list", help="List saved sessions")
+    search = commands.add_parser("search", help="Search saved conversation text")
+    search.add_argument("query", help="Case-insensitive phrase to find")
+    rename = commands.add_parser("rename", help="Give a saved session a name")
+    rename.add_argument("session_id", help="Session ID from sessions list")
+    rename.add_argument("name", help="Name to show in sessions list")
+    args = parser.parse_args(argv[1:])
+    store = SessionStore()
+    try:
+        if args.action == "list":
+            sessions = store.list_sessions(Path.cwd())
+            if not sessions:
+                print("No saved sessions for this workspace.")
+            for item in sessions:
+                print(
+                    f"{item.id}  {item.updated_at}  {item.model}  "
+                    f"{item.name or item.first_request}"
+                )
+        elif args.action == "search":
+            matches = store.search_sessions(Path.cwd(), args.query)
+            if not matches:
+                print("No matching sessions.")
+            for item in matches:
+                print(f"{item.id}  {item.timestamp}  {item.role}: {item.excerpt}")
+        else:
+            store.rename(args.session_id, Path.cwd(), args.name)
+            print(f"Renamed session {args.session_id}.")
+    except (SessionError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse command-line options and run the application."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"login", "logout"}:
         return _auth_command(argv)
+    if argv and argv[0] == "sessions":
+        return _sessions_command(argv)
     parser = argparse.ArgumentParser(
         prog="mclaude",
         description="MClaude: a local-first Python coding agent for the terminal.",
@@ -273,6 +315,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--hooks", type=Path, help="Explicitly enable hooks from a JSON file"
+    )
+    parser.add_argument(
+        "--allow-host-commands",
+        action="store_true",
+        help="Enable approved shell commands on the host (disabled by default)",
     )
     parser.add_argument(
         "--list-skills", action="store_true", help="List available skills"
@@ -510,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
                 mcp=mcp,
                 subagent_budget=args.subagent_budget,
                 read_workers=args.read_workers,
+                allow_host_commands=args.allow_host_commands,
                 terminal_status=terminal_status,
             )
         except KeyboardInterrupt:

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from mclaude.context import (
+    SUMMARY_PREFIX,
     TOOL_TRUNCATION_MARKER,
     ContextBudget,
     ContextBudgetExceeded,
@@ -139,3 +140,54 @@ def test_compaction_preserves_recent_tool_pair_and_summarizes_goal() -> None:
     )
     assert compacted[call_index + 1]["content"][0]["tool_use_id"] == "read-1"
     budget.ensure_fits(compacted)
+
+
+def test_compaction_keeps_recent_requirements_and_prior_summary() -> None:
+    from mclaude.context import _summarize_messages
+
+    history = [
+        {"role": "user", "content": "Build the parser"},
+        {"role": "assistant", "content": [{"type": "text", "text": "x" * 3000}]},
+        {"role": "user", "content": "Keep the JSON format stable"},
+        {"role": "user", "content": "Do not remove the legacy option"},
+    ]
+    first = _summarize_messages(history, 500)
+    repeated = _summarize_messages(
+        [
+            {
+                "role": "user",
+                "content": "Use this compacted context for the earlier conversation.",
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"{SUMMARY_PREFIX}\n{first}",
+                    }
+                ],
+            },
+            {"role": "user", "content": "Also keep Windows support"},
+        ],
+        500,
+    )
+
+    assert "Build the parser" in repeated
+    assert "Do not remove the legacy option" in repeated
+    assert "Also keep Windows support" in repeated
+    assert len(repeated) <= 500
+
+    for _ in range(10):
+        repeated = _summarize_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": f"{SUMMARY_PREFIX}\n{repeated}"}
+                    ],
+                }
+            ],
+            500,
+        )
+    assert "Earlier goal: Build the parser" in repeated
+    assert "Also keep Windows support" in repeated

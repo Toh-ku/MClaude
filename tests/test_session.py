@@ -233,3 +233,72 @@ def test_compacted_history_round_trip_replaces_older_messages(tmp_path: Path) ->
     resumed = store.resume(session_id, workspace)
     assert resumed.history == compacted
     resumed.close()
+
+
+def test_list_and_search_sessions_are_scoped_to_workspace(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(first, "test-model")
+    session_id = session.id
+    session.record_message({"role": "user", "content": "Keep Windows support"})
+    session.record_message(
+        {"role": "assistant", "content": [{"type": "text", "text": "Windows stays"}]}
+    )
+    session.close()
+    other = store.create(second, "test-model")
+    other.record_message({"role": "user", "content": "Windows in another workspace"})
+    other.close()
+
+    listed = store.list_sessions(first)
+    matches = store.search_sessions(first, "WINDOWS")
+
+    assert len(listed) == 1
+    assert listed[0].id == session_id
+    assert listed[0].first_request == "Keep Windows support"
+    assert [(hit.id, hit.role) for hit in matches] == [
+        (session_id, "assistant"),
+        (session_id, "user"),
+    ]
+
+
+def test_search_sessions_ignores_partial_tail_without_modifying_log(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace, "test-model")
+    session.record_message({"role": "user", "content": "Find a decision"})
+    path = session.path
+    session.close()
+    with path.open("ab") as file:
+        file.write(b'{"seq":2,"type":"message')
+    before = path.read_bytes()
+
+    assert store.search_sessions(workspace, "decision")[0].id == session.id
+    assert path.read_bytes() == before
+
+
+def test_rename_session_round_trip_and_preserve_first_request(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = SessionStore(tmp_path / "state")
+    session = store.create(workspace, "test-model")
+    session_id = session.id
+    session.record_message({"role": "user", "content": "Original request"})
+    session.record_message(
+        {"role": "assistant", "content": [{"type": "text", "text": "Done"}]}
+    )
+    session.record_message({"role": "user", "content": "Follow up"})
+    session.close()
+
+    store.rename(session_id, workspace, "Important work")
+    listed = store.list_sessions(workspace)
+    assert listed[0].name == "Important work"
+    assert listed[0].first_request == "Original request"
+    resumed = store.resume(session_id, workspace)
+    assert resumed.name == "Important work"
+    resumed.close()

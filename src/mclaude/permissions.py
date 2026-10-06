@@ -38,6 +38,7 @@ READ_ONLY_TOOLS = frozenset(
         "read_file",
         "find_files",
         "search_text",
+        "search_sessions",
         "list_edit_checkpoints",
         "list_tasks",
         "load_skill",

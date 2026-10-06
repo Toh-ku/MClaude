@@ -55,9 +55,9 @@ def test_agent_reads_file_and_returns_final_answer(
         "read_file",
         "find_files",
         "search_text",
+        "search_sessions",
         "create_file",
         "replace_text",
-        "run_command",
         "list_edit_checkpoints",
         "restore_edit_checkpoint",
         "list_tasks",
@@ -374,11 +374,38 @@ def test_agent_asks_before_running_command(
         workspace=tmp_path,
         request=request,
         permission_gate=PermissionGate(prompt=approve),
+        allow_host_commands=True,
     )
 
     assert result.text == "Tests passed."
     assert prompts == [("run_command", "This tool executes a shell command.")]
     assert executions == [({"command": "pytest"}, tmp_path.resolve())]
+
+
+def test_agent_rejects_command_when_host_commands_are_disabled(
+    tmp_path: Path, config: ModelConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = iter(
+        [
+            ModelResponse(
+                (ToolUseBlock("command", "run_command", {"command": "pytest"}),),
+                "tool_use",
+            ),
+            ModelResponse((TextBlock("Command unavailable."),), "end_turn"),
+        ]
+    )
+
+    def request(messages, request_config, *, tools):
+        assert "run_command" not in {tool["name"] for tool in tools}
+        return next(responses)
+
+    def unexpected_execution(*args, **kwargs):
+        pytest.fail("Disabled command was executed")
+
+    monkeypatch.setattr("mclaude.agent.run_command", unexpected_execution)
+    result = run_agent("Run tests", config, workspace=tmp_path, request=request)
+
+    assert result.text == "Command unavailable."
 
 
 def test_agent_preserves_partial_text_when_output_is_truncated(
@@ -604,6 +631,7 @@ def test_cancelled_tool_batch_keeps_results_and_skips_remaining_calls(
             workspace=tmp_path,
             request=request,
             permission_gate=PermissionGate(prompt=approve),
+            allow_host_commands=True,
         )
     assert executions == (["first"] if during_permission else ["first", "active"])
     results = history[-1]["content"]

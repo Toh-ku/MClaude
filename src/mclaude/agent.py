@@ -47,6 +47,7 @@ from mclaude.tools import (
     replace_text,
     restore_edit_checkpoint,
     run_command,
+    search_sessions,
     search_text,
 )
 
@@ -87,17 +88,26 @@ def _execute_tool(
     *,
     max_file_chars: int,
     checkpoints: CheckpointStore,
+    allow_host_commands: bool = False,
 ) -> ToolResult:
     if block.name != "read_file":
         if block.name == "find_files":
             return find_files(block.input, workspace)
         if block.name == "search_text":
             return search_text(block.input, workspace)
+        if block.name == "search_sessions":
+            return search_sessions(block.input, workspace)
         if block.name == "create_file":
             return create_file(block.input, workspace, checkpoints=checkpoints)
         if block.name == "replace_text":
             return replace_text(block.input, workspace, checkpoints=checkpoints)
         if block.name == "run_command":
+            if not allow_host_commands:
+                return ToolResult(
+                    "Host commands are disabled. Start MClaude with "
+                    "--allow-host-commands to enable them.",
+                    is_error=True,
+                )
             return run_command(block.input, workspace)
         if block.name == "list_edit_checkpoints":
             return list_edit_checkpoints(block.input, checkpoints)
@@ -131,6 +141,7 @@ def run_agent(
     subagent_budget: int = 8,
     subagent_depth: int = 0,
     read_workers: int = 4,
+    allow_host_commands: bool = False,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -156,6 +167,10 @@ def run_agent(
     subagents = SubagentRunner(subagent_budget, subagent_depth)
     skills = SkillCatalog(workspace)
     tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS, LOAD_SKILL_DEFINITION]
+    if not allow_host_commands:
+        tool_definitions = [
+            tool for tool in tool_definitions if tool["name"] != "run_command"
+        ]
     if mcp is not None and not planning:
         try:
             mcp.connect()
@@ -333,7 +348,12 @@ def run_agent(
             )
 
         def prepare(call: ToolUseBlock) -> ToolResult | None:
-            if allowed_tools is not None and call.name not in allowed_tools:
+            if call.name == "run_command" and not allow_host_commands:
+                permission = PermissionDecision(
+                    PermissionAction.DENY,
+                    "Host commands are disabled; use --allow-host-commands.",
+                )
+            elif allowed_tools is not None and call.name not in allowed_tools:
                 permission = PermissionDecision(
                     PermissionAction.DENY,
                     "Tool is outside this agent's allowed set.",
@@ -380,6 +400,7 @@ def run_agent(
                     workspace,
                     max_file_chars=max_file_chars,
                     checkpoints=checkpoint_store,
+                    allow_host_commands=allow_host_commands,
                 )
 
             return (

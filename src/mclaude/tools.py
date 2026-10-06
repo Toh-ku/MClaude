@@ -15,6 +15,7 @@ from pathspec import GitIgnoreSpec, PathSpec
 
 from mclaude.cancellation import TurnCancelled, check_read_cancelled, protect_cleanup
 from mclaude.checkpoints import CheckpointError, CheckpointStore
+from mclaude.session import SessionError, SessionStore
 
 DEFAULT_MAX_SEARCH_RESULTS = 200
 DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000
@@ -83,6 +84,20 @@ SEARCH_TEXT_DEFINITION = {
                 "description": "Use case-sensitive matching (default: true)",
             },
         },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
+
+SEARCH_SESSIONS_DEFINITION = {
+    "name": "search_sessions",
+    "description": (
+        "Search user and assistant text from saved sessions in this workspace. "
+        "Use it to recover a decision or prior request from another session."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Phrase to search"}},
         "required": ["query"],
         "additionalProperties": False,
     },
@@ -188,6 +203,7 @@ TOOL_DEFINITIONS = [
     READ_FILE_DEFINITION,
     FIND_FILES_DEFINITION,
     SEARCH_TEXT_DEFINITION,
+    SEARCH_SESSIONS_DEFINITION,
     CREATE_FILE_DEFINITION,
     REPLACE_TEXT_DEFINITION,
     RUN_COMMAND_DEFINITION,
@@ -494,6 +510,26 @@ def search_text(
     if truncated:
         matches.append(f"[Results truncated after {max_results} matches.]")
     return ToolResult("\n".join(matches))
+
+
+def search_sessions(tool_input: object, workspace: Path) -> ToolResult:
+    if not isinstance(tool_input, dict):
+        return ToolResult("search_sessions input must be an object.", is_error=True)
+    query = tool_input.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return ToolResult("search_sessions requires a non-empty query.", is_error=True)
+    try:
+        matches = SessionStore().search_sessions(workspace, query, max_results=10)
+    except SessionError as exc:
+        return ToolResult(f"Could not search sessions: {exc}", is_error=True)
+    if not matches:
+        return ToolResult("No matching sessions.")
+    return ToolResult(
+        "\n".join(
+            f"{match.id} {match.timestamp} {match.role}: {match.excerpt}"
+            for match in matches
+        )
+    )
 
 
 def create_file(

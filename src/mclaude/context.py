@@ -192,12 +192,20 @@ def _clip(value: str, limit: int = 500) -> str:
 
 
 def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
-    lines: list[str] = []
+    previous: list[str] = []
+    user_requests: list[str] = []
+    assistant_updates: list[str] = []
+    tool_errors: list[str] = []
     for message in messages:
         role = message.get("role", "unknown")
         content = message.get("content")
         if isinstance(content, str):
-            lines.append(f"{role.title()}: {_clip(content)}")
+            if (
+                role == "user"
+                and content
+                != "Use this compacted context for the earlier conversation."
+            ):
+                user_requests.append(content)
             continue
         if not isinstance(content, list):
             continue
@@ -205,25 +213,55 @@ def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
-                lines.append(f"{role.title()}: {_clip(str(block.get('text', '')))}")
-            elif block.get("type") == "tool_use":
-                arguments = json.dumps(
-                    block.get("input"), ensure_ascii=False, separators=(",", ":")
-                )
-                lines.append(
-                    f"Tool call {block.get('name')} ({block.get('id')}): "
-                    f"{_clip(arguments)}"
-                )
-            elif block.get("type") == "tool_result":
-                status = "error" if block.get("is_error") else "ok"
-                lines.append(
-                    f"Tool result {block.get('tool_use_id')} [{status}]: "
-                    f"{_clip(str(block.get('content', '')))}"
-                )
-    summary = "\n".join(lines)
-    if len(summary) > limit:
-        summary = summary[: max(0, limit - 30)] + "\n...[summary shortened]"
-    return summary
+                value = str(block.get("text", ""))
+                if value.startswith(SUMMARY_PREFIX):
+                    previous.extend(
+                        value.removeprefix(SUMMARY_PREFIX).strip().splitlines()
+                    )
+                elif role == "assistant":
+                    assistant_updates.append(value)
+            elif block.get("type") == "tool_result" and block.get("is_error"):
+                tool_errors.append(str(block.get("content", "")))
+
+    lines: list[str] = []
+    used = 0
+
+    def add(label: str, value: str, cap: int) -> None:
+        nonlocal used
+        remaining = limit - used - len(label) - 2
+        if remaining <= 12 or not value.strip():
+            return
+        line = f"{label}: {_clip(value, min(cap, remaining))}"
+        lines.append(line)
+        used += len(line) + 1
+
+    goal = ""
+    prior_requests: list[str] = []
+    earlier_context: list[str] = []
+    for line in previous:
+        if line.startswith(("Earlier goal: ", "Original request: ")) and not goal:
+            goal = line.split(": ", 1)[1]
+        elif line.startswith("Recent user request: "):
+            prior_requests.append(line.removeprefix("Recent user request: "))
+        else:
+            earlier_context.append(line)
+    if not goal and previous:
+        goal = previous[0]
+    if not goal and user_requests:
+        goal = user_requests[0]
+    add("Earlier goal", goal, min(350, limit // 3))
+    recent_requests = [*reversed(prior_requests), *user_requests]
+    for value in reversed(recent_requests[-5:]):
+        if value == goal:
+            continue
+        add("Recent user request", value, min(500, limit // 3))
+    for value in reversed(earlier_context):
+        add("Earlier context", value, min(300, limit // 4))
+    for value in reversed(assistant_updates[-4:]):
+        add("Assistant update", value, min(350, limit // 4))
+    for value in reversed(tool_errors[-2:]):
+        add("Tool error", value, min(250, limit // 5))
+    return "\n".join(lines)
 
 
 def compact_history(

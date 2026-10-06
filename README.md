@@ -56,6 +56,9 @@ uv run mclaude "读取这个项目并总结其结构"
 | 交互会话 | `uv run mclaude` 或 `uv run mclaude -i` |
 | 恢复最近会话 | `uv run mclaude --continue` |
 | 恢复指定会话 | `uv run mclaude --resume SESSION_ID` |
+| 列出当前工作区会话 | `uv run mclaude sessions list` |
+| 搜索历史会话 | `uv run mclaude sessions search "关键词"` |
+| 命名会话 | `uv run mclaude sessions rename SESSION_ID "名称"` |
 | 只读规划 | `uv run mclaude --plan "分析并制定计划"` |
 | 临时、不持久化的会话 | `uv run mclaude -i --no-persist` |
 | 查看项目规则来源 | `uv run mclaude --show-instructions` |
@@ -106,6 +109,12 @@ API Key 和模型的空环境变量视为未配置；空的 `ANTHROPIC_BASE_URL`
 `--max-iterations`、`--context-budget`、`--read-workers` 和
 `--subagent-budget`。以 `uv run mclaude --help` 的输出为准。
 
+### 宿主机命令
+
+Agent 默认不开放 `run_command`。需要运行测试或其他开发命令时，显式传入
+`--allow-host-commands`；每次调用仍会请求确认。此选项在宿主机执行命令，
+不提供操作系统级沙箱。文件工具仍受工作区范围限制。
+
 ### 会话
 
 无参数启动或传入 `-i` 会进入交互模式，并默认持久化会话。Windows 的默认状态目录为
@@ -113,6 +122,10 @@ API Key 和模型的空环境变量视为未配置；空的 `ANTHROPIC_BASE_URL`
 `~/.local/state/mclaude`。日志可能包含对话、源码片段和命令输出，但不保存 API 密钥。
 
 恢复会话只会重建消息历史，不会重放历史工具调用。若进程在工具运行中异常退出，恢复时会标记结果未知，要求先检查工作区。
+
+`sessions list` 和 `sessions search` 不需要 API Key。搜索限定在当前工作区的已保存会话，
+只检索用户与助手正文；Agent 也可以通过只读的 `search_sessions` 工具查询这些记录。
+压缩上下文时会优先保留原始目标、最近用户要求和已有摘要；未完成任务仍由任务板独立保存。
 
 ### 项目规则与技能
 
@@ -159,7 +172,8 @@ Hooks 是受信任的本地程序；MCP 支持本地 stdio 和远程 Streamable 
 - `create_file` 不覆盖已有文件；`replace_text` 要求旧文本精确且唯一。
 - 写入前后会保存编辑检查点；文件后来发生变化时拒绝强制恢复。
 - `--plan` 在运行时阻止写入、命令、任务修改、Hooks 和 MCP。
-- `run_command` 的目录受限于工作区，但它不是操作系统沙箱；授权前请检查完整命令。
+- `run_command` 默认不可用；`--allow-host-commands` 会在宿主机执行命令，
+  其运行目录受限于工作区，但命令本身可访问工作区外的资源。
 
 ## 项目官网
 

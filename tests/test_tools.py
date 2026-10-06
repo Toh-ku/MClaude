@@ -14,6 +14,7 @@ from mclaude.tools import (
     read_file,
     replace_text,
     run_command,
+    search_sessions,
     search_text,
 )
 
@@ -188,6 +189,22 @@ def test_search_text_skips_oversized_files_and_truncates_lines(tmp_path: Path) -
     )
 
     assert result.content == "line.txt:1:needle…"
+
+
+def test_search_sessions_recovers_prior_request(tmp_path: Path, monkeypatch) -> None:
+    from mclaude.session import SessionStore
+
+    monkeypatch.setenv("MCLAUDE_STATE_DIR", str(tmp_path / "state"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = SessionStore().create(workspace, "test-model")
+    session.record_message({"role": "user", "content": "Choose SQLite for storage"})
+    session.close()
+
+    result = search_sessions({"query": "sqlite"}, workspace)
+
+    assert session.id in result.content
+    assert "Choose SQLite for storage" in result.content
 
 
 def test_create_file_creates_parents_and_returns_diff(tmp_path: Path) -> None:

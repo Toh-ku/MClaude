@@ -320,3 +320,42 @@ def test_no_persist_leaves_no_saved_session(conversation, monkeypatch, tmp_path)
 def test_single_turn_does_not_create_session(conversation, tmp_path):
     assert cli.main(["One task"]) == 0
     assert not (tmp_path / ".state").exists()
+
+
+def test_session_listing_and_search_do_not_need_api_credentials(
+    conversation, monkeypatch, capsys
+):
+    enter_lines(monkeypatch, ["/exit"])
+    assert cli.main(["-i", "Remember the migration choice"]) == 0
+    capsys.readouterr()
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.delenv("ANTHROPIC_MODEL")
+
+    assert cli.main(["sessions", "list"]) == 0
+    listed = capsys.readouterr().out
+    assert "Remember the migration choice" in listed
+    assert cli.main(["sessions", "search", "MIGRATION"]) == 0
+    assert "Remember the migration choice" in capsys.readouterr().out
+
+    session_id = listed.split()[0]
+    assert cli.main(["sessions", "rename", session_id, "Migration work"]) == 0
+    capsys.readouterr()
+    assert cli.main(["sessions", "list"]) == 0
+    assert "Migration work" in capsys.readouterr().out
+
+
+def test_host_commands_are_disabled_by_default_with_explicit_override(
+    conversation, monkeypatch
+):
+    from mclaude.agent import AgentResponse
+
+    modes = []
+
+    def agent(*args, **kwargs):
+        modes.append(kwargs["allow_host_commands"])
+        return AgentResponse("done")
+
+    monkeypatch.setattr(cli, "run_agent", agent)
+    assert cli.main(["First task"]) == 0
+    assert cli.main(["--allow-host-commands", "Second task"]) == 0
+    assert modes == [False, True]

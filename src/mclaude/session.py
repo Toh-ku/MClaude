@@ -24,6 +24,23 @@ class SessionError(RuntimeError):
     """A session could not be created, loaded, or updated safely."""
 
 
+@dataclass(frozen=True)
+class SessionInfo:
+    id: str
+    updated_at: str
+    model: str
+    first_request: str
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionMatch:
+    id: str
+    timestamp: str
+    role: str
+    excerpt: str
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -191,6 +208,7 @@ class Session:
     _sequence: int
     recovery_warning: str | None = None
     task_board: TaskBoard = field(default_factory=TaskBoard)
+    name: str | None = None
     _closed: bool = field(default=False, init=False)
 
     def record_message(self, message: dict[str, Any]) -> None:
@@ -214,6 +232,12 @@ class Session:
     def record_compaction(self, history: list[dict[str, Any]]) -> None:
         validated = _validate_complete_history(history)
         self._append({"type": "context.compacted", "history": validated})
+
+    def record_name(self, name: str) -> None:
+        if not isinstance(name, str) or not name.strip() or len(name) > 120:
+            raise ValueError("Session name must be 1-120 characters.")
+        self._append({"type": "session.named", "name": name.strip()})
+        self.name = name.strip()
 
     def _append(self, event: dict[str, Any]) -> None:
         if self._closed:
@@ -259,6 +283,136 @@ class SessionStore:
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or _state_root()).resolve() / "sessions"
+
+    def _workspace_logs(self, workspace: Path) -> list[Path]:
+        directory = self.root / _workspace_key(workspace)
+        try:
+            return sorted(
+                directory.glob("*.jsonl"),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            )
+        except OSError as exc:
+            raise SessionError(f"Could not inspect saved sessions: {exc}") from exc
+
+    def _inspect_records(self, path: Path, workspace: Path) -> list[dict[str, Any]]:
+        """Read a possibly active journal without taking a writer lock."""
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise SessionError(f"Could not read session: {exc}") from exc
+        lines = data.split(b"\n")[:-1]
+        records: list[dict[str, Any]] = []
+        for raw in lines:
+            if len(raw) > MAX_EVENT_BYTES:
+                raise SessionError(f"Session record is too large: {path.name}")
+            try:
+                record = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SessionError(f"Session record is corrupt: {path.name}") from exc
+            if not isinstance(record, dict):
+                raise SessionError(f"Session record is invalid: {path.name}")
+            records.append(record)
+        header = records[0] if records else None
+        if (
+            not isinstance(header, dict)
+            or header.get("type") != "session.created"
+            or header.get("version") != SESSION_VERSION
+            or header.get("id") != path.stem
+            or not isinstance(header.get("workspace"), str)
+            or not _same_workspace(header["workspace"], workspace)
+        ):
+            raise SessionError(f"Session header is invalid: {path.name}")
+        return records
+
+    def list_sessions(self, workspace: Path) -> list[SessionInfo]:
+        workspace = workspace.resolve()
+        sessions = []
+        for path in self._workspace_logs(workspace):
+            records = self._inspect_records(path, workspace)
+            first_request = ""
+            name = None
+            for record in records[1:]:
+                message = record.get("message")
+                if (
+                    record.get("type") == "message.appended"
+                    and isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and isinstance(message.get("content"), str)
+                    and not first_request
+                ):
+                    first_request = " ".join(message["content"].split())[:120]
+                if record.get("type") == "session.named":
+                    name = record.get("name")
+            sessions.append(
+                SessionInfo(
+                    id=path.stem,
+                    updated_at=str(records[-1].get("timestamp", "")),
+                    model=str(records[0].get("model", "")),
+                    first_request=first_request,
+                    name=name,
+                )
+            )
+        return sessions
+
+    def rename(self, session_id: str, workspace: Path, name: str) -> None:
+        session = self.resume(session_id, workspace)
+        try:
+            session.record_name(name)
+        finally:
+            session.close()
+
+    def search_sessions(
+        self, workspace: Path, query: str, *, max_results: int = 20
+    ) -> list[SessionMatch]:
+        if not query.strip():
+            raise ValueError("Search query must not be empty.")
+        if max_results <= 0:
+            raise ValueError("max_results must be positive.")
+        workspace = workspace.resolve()
+        needle = query.casefold()
+        matches: list[SessionMatch] = []
+        for path in self._workspace_logs(workspace):
+            for record in reversed(self._inspect_records(path, workspace)[1:]):
+                if record.get("type") != "message.appended":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                role = message.get("role")
+                if role not in {"user", "assistant"}:
+                    continue
+                content = message.get("content")
+                texts = (
+                    [content]
+                    if isinstance(content, str)
+                    else [
+                        block["text"]
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    ]
+                    if isinstance(content, list)
+                    else []
+                )
+                for value in texts:
+                    offset = value.casefold().find(needle)
+                    if offset < 0:
+                        continue
+                    start = max(0, offset - 80)
+                    excerpt = " ".join(value[start : offset + len(query) + 120].split())
+                    matches.append(
+                        SessionMatch(
+                            id=path.stem,
+                            timestamp=str(record.get("timestamp", "")),
+                            role=role,
+                            excerpt=excerpt,
+                        )
+                    )
+                    if len(matches) >= max_results:
+                        return matches
+        return matches
 
     def create(self, workspace: Path, model: str) -> Session:
         workspace = workspace.resolve()
@@ -324,15 +478,7 @@ class SessionStore:
 
     def continue_latest(self, workspace: Path) -> Session:
         workspace = workspace.resolve()
-        directory = self.root / _workspace_key(workspace)
-        try:
-            candidates = sorted(
-                directory.glob("*.jsonl"),
-                key=lambda candidate: candidate.stat().st_mtime_ns,
-                reverse=True,
-            )
-        except OSError as exc:
-            raise SessionError(f"Could not inspect saved sessions: {exc}") from exc
+        candidates = self._workspace_logs(workspace)
         if not candidates:
             raise SessionError("No saved session exists for this workspace.")
         return self._load(candidates[0], workspace)
@@ -360,7 +506,7 @@ class SessionStore:
                     "That session belongs to a different workspace and cannot be "
                     "resumed here."
                 )
-            history, pending, sequence, task_board = self._project(records[1:])
+            history, pending, sequence, task_board, name = self._project(records[1:])
             session = Session(
                 id=session_id,
                 workspace=workspace,
@@ -370,6 +516,7 @@ class SessionStore:
                 _lock_token=lock_token,
                 _sequence=sequence,
                 task_board=task_board,
+                name=name,
             )
             warnings = []
             if tail_repaired:
@@ -450,9 +597,10 @@ class SessionStore:
 
     def _project(
         self, records: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[str], int, TaskBoard]:
+    ) -> tuple[list[dict[str, Any]], list[str], int, TaskBoard, str | None]:
         history: list[dict[str, Any]] = []
         task_board = TaskBoard()
+        name = None
         pending: list[str] = []
         result_message: dict[str, Any] | None = None
         sequence = 0
@@ -509,6 +657,11 @@ class SessionStore:
                     )
                 history = _validate_complete_history(record.get("history"))
                 result_message = None
+            elif event_type == "session.named":
+                value = record.get("name")
+                if not isinstance(value, str) or not value.strip() or len(value) > 120:
+                    raise SessionError("Session contains an invalid name.")
+                name = value
             else:
                 raise SessionError(f"Unsupported session event: {event_type!r}.")
-        return history, pending, sequence, task_board
+        return history, pending, sequence, task_board, name
