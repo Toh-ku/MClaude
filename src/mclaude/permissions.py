@@ -48,7 +48,7 @@ READ_ONLY_TOOLS = frozenset(
 FILE_EDIT_TOOLS = frozenset(
     {"create_file", "replace_text", "apply_edits", "restore_edit_checkpoint"}
 )
-COMMAND_TOOLS = frozenset({"run_command"})
+COMMAND_TOOLS = frozenset({"run_command", "run_checks", "retest_checks"})
 
 
 def default_permission_policy(request: PermissionRequest) -> PermissionDecision:

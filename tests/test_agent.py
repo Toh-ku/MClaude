@@ -399,6 +399,8 @@ def test_agent_rejects_command_when_host_commands_are_disabled(
 
     def request(messages, request_config, *, tools):
         assert "run_command" not in {tool["name"] for tool in tools}
+        assert "run_checks" not in {tool["name"] for tool in tools}
+        assert "retest_checks" not in {tool["name"] for tool in tools}
         return next(responses)
 
     def unexpected_execution(*args, **kwargs):

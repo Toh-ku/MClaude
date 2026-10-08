@@ -25,6 +25,7 @@ from mclaude.session import Session, SessionError, SessionStore
 from mclaude.skills import SkillCatalog
 from mclaude.tasks import TaskBoard
 from mclaude.terminal import TerminalStatus, supports_status_view
+from mclaude.verification import VerificationWorkflow
 
 
 def _prompt_tool_permission(request: PermissionRequest, reason: str) -> bool:
@@ -61,6 +62,7 @@ def _run_conversation(
     if terminal_status is not None:
         terminal_status.history = history
     task_board = session.task_board if session is not None else TaskBoard()
+    verification = VerificationWorkflow()
     workspace = Path.cwd()
     permission_gate = PermissionGate(prompt=_prompt_tool_permission)
     exit_code = 0
@@ -147,6 +149,7 @@ def _run_conversation(
                 subagent_budget=subagent_budget,
                 read_workers=read_workers,
                 allow_host_commands=allow_host_commands,
+                verification=verification,
                 on_text=display_text,
                 on_history_event=(
                     record_history_event

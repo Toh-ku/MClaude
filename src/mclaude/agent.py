@@ -52,6 +52,11 @@ from mclaude.tools import (
     search_sessions,
     search_text,
 )
+from mclaude.verification import (
+    EDIT_TOOLS,
+    VERIFICATION_DEFINITIONS,
+    VerificationWorkflow,
+)
 
 DEFAULT_MAX_ITERATIONS = 8
 DEFAULT_MAX_FILE_CHARS = 100_000
@@ -148,6 +153,7 @@ def run_agent(
     subagent_depth: int = 0,
     read_workers: int = 4,
     allow_host_commands: bool = False,
+    verification: VerificationWorkflow | None = None,
 ) -> AgentResponse:
     """Run one turn, appending messages to history when supplied.
 
@@ -170,12 +176,20 @@ def run_agent(
     system_prompt = project_instructions.system_prompt()
     base_system_prompt = system_prompt or ""
     task_board = task_board if task_board is not None else TaskBoard()
+    verification = verification if verification is not None else VerificationWorkflow()
     subagents = SubagentRunner(subagent_budget, subagent_depth)
     skills = SkillCatalog(workspace)
-    tool_definitions = [*TOOL_DEFINITIONS, *TASK_DEFINITIONS, LOAD_SKILL_DEFINITION]
+    tool_definitions = [
+        *TOOL_DEFINITIONS,
+        *VERIFICATION_DEFINITIONS,
+        *TASK_DEFINITIONS,
+        LOAD_SKILL_DEFINITION,
+    ]
     if not allow_host_commands:
         tool_definitions = [
-            tool for tool in tool_definitions if tool["name"] != "run_command"
+            tool
+            for tool in tool_definitions
+            if tool["name"] not in {"run_command", "run_checks", "retest_checks"}
         ]
     if mcp is not None and not planning:
         try:
@@ -215,6 +229,8 @@ def run_agent(
         system_prompt = base_system_prompt
         if task_board.tasks:
             system_prompt += "\nCurrent task state:\n" + task_board.render()
+        if allow_host_commands and verification.state != "not_run":
+            system_prompt += "\n" + verification.summary()
         chunks: list[str] = []
 
         def emit_text(chunk: str, buffer: list[str] = chunks) -> None:
@@ -354,7 +370,10 @@ def run_agent(
             )
 
         def prepare(call: ToolUseBlock) -> ToolResult | None:
-            if call.name == "run_command" and not allow_host_commands:
+            if (
+                call.name in {"run_command", "run_checks", "retest_checks"}
+                and not allow_host_commands
+            ):
                 permission = PermissionDecision(
                     PermissionAction.DENY,
                     "Host commands are disabled; use --allow-host-commands.",
@@ -368,11 +387,18 @@ def run_agent(
                 permission = PermissionDecision(
                     PermissionAction.DENY, "Tool is blocked in planning mode."
                 )
+            elif call.name == "retest_checks" and not verification.checks:
+                return ToolResult("No prior checks are available to retest.", True)
             else:
+                permission_input = (
+                    {"checks": verification.current_checks()}
+                    if call.name == "retest_checks"
+                    else call.input
+                )
                 permission = permission_gate.check(
                     PermissionRequest(
                         tool_name=call.name,
-                        tool_input=call.input,
+                        tool_input=permission_input,
                         external=mcp is not None and call.name in mcp.routes,
                     )
                 )
@@ -401,13 +427,20 @@ def run_agent(
                         context_budget_tokens=context_budget_tokens,
                         max_file_chars=max_file_chars,
                     )
-                return _execute_tool(
+                if call.name in {"run_checks", "retest_checks"}:
+                    return verification.run(
+                        call.input, workspace, retest=call.name == "retest_checks"
+                    )
+                result = _execute_tool(
                     call,
                     workspace,
                     max_file_chars=max_file_chars,
                     checkpoints=checkpoint_store,
                     allow_host_commands=allow_host_commands,
                 )
+                if call.name in EDIT_TOOLS and not result.is_error:
+                    verification.mark_edited()
+                return result
 
             return (
                 hooks.execute(call.name, call.input, workspace, execute)

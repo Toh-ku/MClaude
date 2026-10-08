@@ -43,10 +43,11 @@ def test_default_policy_asks_before_file_edits() -> None:
 
 
 def test_default_policy_asks_before_commands() -> None:
-    decision = default_permission_policy(PermissionRequest("run_command", {}))
+    for tool_name in ("run_command", "run_checks", "retest_checks"):
+        decision = default_permission_policy(PermissionRequest(tool_name, {}))
 
-    assert decision.action is PermissionAction.ASK
-    assert "shell command" in decision.reason
+        assert decision.action is PermissionAction.ASK
+        assert "shell command" in decision.reason
 
 
 def test_gate_returns_direct_allow_and_deny_decisions() -> None:
