@@ -58,6 +58,8 @@ def test_agent_reads_file_and_returns_final_answer(
         "search_sessions",
         "create_file",
         "replace_text",
+        "apply_edits",
+        "git_review",
         "list_edit_checkpoints",
         "restore_edit_checkpoint",
         "list_tasks",

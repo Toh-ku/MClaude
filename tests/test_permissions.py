@@ -15,6 +15,7 @@ def test_default_policy_allows_known_read_only_tools() -> None:
         "find_files",
         "search_text",
         "list_edit_checkpoints",
+        "git_review",
     ):
         decision = default_permission_policy(PermissionRequest(tool_name, {}))
 
@@ -29,7 +30,12 @@ def test_default_policy_denies_unknown_tools() -> None:
 
 
 def test_default_policy_asks_before_file_edits() -> None:
-    for tool_name in ("create_file", "replace_text", "restore_edit_checkpoint"):
+    for tool_name in (
+        "create_file",
+        "replace_text",
+        "apply_edits",
+        "restore_edit_checkpoint",
+    ):
         decision = default_permission_policy(PermissionRequest(tool_name, {}))
 
         assert decision.action is PermissionAction.ASK

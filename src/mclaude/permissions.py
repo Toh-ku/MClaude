@@ -42,9 +42,12 @@ READ_ONLY_TOOLS = frozenset(
         "list_edit_checkpoints",
         "list_tasks",
         "load_skill",
+        "git_review",
     }
 )
-FILE_EDIT_TOOLS = frozenset({"create_file", "replace_text", "restore_edit_checkpoint"})
+FILE_EDIT_TOOLS = frozenset(
+    {"create_file", "replace_text", "apply_edits", "restore_edit_checkpoint"}
+)
 COMMAND_TOOLS = frozenset({"run_command"})
 
 

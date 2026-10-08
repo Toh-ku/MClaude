@@ -13,7 +13,7 @@ from mclaude.cancellation import (
 from mclaude.provider import ToolUseBlock
 from mclaude.tools import ToolResult
 
-PARALLEL_TOOLS = frozenset({"read_file", "find_files", "search_text"})
+PARALLEL_TOOLS = frozenset({"read_file", "find_files", "search_text", "git_review"})
 Execute = Callable[[ToolUseBlock], ToolResult]
 Prepare = Callable[[ToolUseBlock], ToolResult | None]
 Record = Callable[[ToolUseBlock, ToolResult], None]

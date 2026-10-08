@@ -40,8 +40,10 @@ from mclaude.tasks import TASK_DEFINITIONS, TaskBoard
 from mclaude.tools import (
     TOOL_DEFINITIONS,
     ToolResult,
+    apply_edits,
     create_file,
     find_files,
+    git_review,
     list_edit_checkpoints,
     read_file,
     replace_text,
@@ -101,6 +103,10 @@ def _execute_tool(
             return create_file(block.input, workspace, checkpoints=checkpoints)
         if block.name == "replace_text":
             return replace_text(block.input, workspace, checkpoints=checkpoints)
+        if block.name == "apply_edits":
+            return apply_edits(block.input, workspace, checkpoints=checkpoints)
+        if block.name == "git_review":
+            return git_review(block.input, workspace)
         if block.name == "run_command":
             if not allow_host_commands:
                 return ToolResult(

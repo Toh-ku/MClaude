@@ -141,6 +141,54 @@ REPLACE_TEXT_DEFINITION = {
     },
 }
 
+APPLY_EDITS_DEFINITION = {
+    "name": "apply_edits",
+    "description": (
+        "Apply up to 20 create or exact-replace edits across distinct workspace files "
+        "in one approved call. Validate every edit before writing; return diffs and "
+        "individual edit checkpoints."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["create", "replace"]},
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                    },
+                    "required": ["kind", "path"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": False,
+    },
+}
+
+GIT_REVIEW_DEFINITION = {
+    "name": "git_review",
+    "description": (
+        "Review workspace Git changes without modifying them. 'diff' shows status "
+        "and tracked changes from HEAD; 'precommit' checks both staged and "
+        "unstaged changes for whitespace errors and reports untracked files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["diff", "precommit"]}},
+        "required": ["mode"],
+        "additionalProperties": False,
+    },
+}
+
 RUN_COMMAND_DEFINITION = {
     "name": "run_command",
     "description": (
@@ -206,6 +254,8 @@ TOOL_DEFINITIONS = [
     SEARCH_SESSIONS_DEFINITION,
     CREATE_FILE_DEFINITION,
     REPLACE_TEXT_DEFINITION,
+    APPLY_EDITS_DEFINITION,
+    GIT_REVIEW_DEFINITION,
     RUN_COMMAND_DEFINITION,
     LIST_CHECKPOINTS_DEFINITION,
     RESTORE_CHECKPOINT_DEFINITION,
@@ -689,6 +739,206 @@ def replace_text(
     return ToolResult(
         f"Updated {resolved.relative_to(workspace).as_posix()}{checkpoint}\n\n{diff}"
     )
+
+
+def apply_edits(
+    tool_input: object,
+    workspace: Path,
+    *,
+    checkpoints: CheckpointStore | None = None,
+) -> ToolResult:
+    """Preflight a small multi-file edit, then write it with recovery checkpoints."""
+    if not isinstance(tool_input, dict) or set(tool_input) != {"edits"}:
+        return ToolResult("apply_edits requires only an edits array.", True)
+    edits = tool_input["edits"]
+    if not isinstance(edits, list) or not 1 <= len(edits) <= 20:
+        return ToolResult("apply_edits requires 1-20 edits.", True)
+
+    workspace = workspace.resolve()
+    planned: list[tuple[Path, bytes | None, bytes, str]] = []
+    seen: set[Path] = set()
+    for index, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict) or edit.get("kind") not in {"create", "replace"}:
+            return ToolResult(f"Edit {index} needs a create or replace kind.", True)
+        kind = edit["kind"]
+        expected_keys = (
+            {"kind", "path", "content"}
+            if kind == "create"
+            else {"kind", "path", "old_text", "new_text"}
+        )
+        path_value = edit.get("path")
+        if (
+            set(edit) != expected_keys
+            or not isinstance(path_value, str)
+            or not path_value.strip()
+        ):
+            return ToolResult(f"Edit {index} has invalid fields.", True)
+        path = _resolve_in_workspace(path_value, workspace)
+        if path is None:
+            return ToolResult(f"Edit {index} path is outside the workspace.", True)
+        if path in seen:
+            return ToolResult(f"Edit {index} repeats a file in this batch.", True)
+        seen.add(path)
+        try:
+            if kind == "create":
+                content = edit["content"]
+                if not isinstance(content, str):
+                    return ToolResult(f"Edit {index} content must be text.", True)
+                if path.exists():
+                    return ToolResult(
+                        f"Edit {index} would overwrite an existing file.", True
+                    )
+                before = None
+                after = content.encode("utf-8")
+            else:
+                old_text = edit["old_text"]
+                new_text = edit["new_text"]
+                if (
+                    not isinstance(old_text, str)
+                    or not old_text
+                    or not isinstance(new_text, str)
+                    or old_text == new_text
+                ):
+                    return ToolResult(
+                        f"Edit {index} has invalid replacement text.", True
+                    )
+                if not path.is_file():
+                    return ToolResult(f"Edit {index} file does not exist.", True)
+                before = path.read_bytes()
+                if len(before) > DEFAULT_MAX_EDIT_FILE_BYTES:
+                    return ToolResult(
+                        f"Edit {index} exceeds the file edit limit.", True
+                    )
+                original = before.decode("utf-8")
+                if original.count(old_text) != 1:
+                    return ToolResult(
+                        f"Edit {index} expected text must match exactly once.", True
+                    )
+                after = original.replace(old_text, new_text, 1).encode("utf-8")
+            if len(after) > DEFAULT_MAX_EDIT_FILE_BYTES:
+                return ToolResult(f"Edit {index} exceeds the file edit limit.", True)
+        except (OSError, UnicodeError) as exc:
+            return ToolResult(
+                f"Could not prepare edit {index}: {type(exc).__name__}.", True
+            )
+        planned.append((path, before, after, kind))
+
+    checkpoints = checkpoints or CheckpointStore(workspace)
+    saved: list[str] = []
+    try:
+        for path, before, after, _ in planned:
+            saved.append(checkpoints.save(path, before, after))
+    except (OSError, CheckpointError) as exc:
+        for checkpoint_id in saved:
+            checkpoints.discard(checkpoint_id)
+        return ToolResult(
+            f"Could not prepare edit checkpoints: {type(exc).__name__}.", True
+        )
+
+    applied: list[tuple[Path, bytes | None, bytes]] = []
+    try:
+        for path, before, after, kind in planned:
+            if kind == "create":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.parent.resolve().is_relative_to(workspace):
+                    raise OSError("Edit path left the workspace")
+                with path.open("xb") as file:
+                    applied.append((path, before, after))
+                    file.write(after)
+            elif not _atomic_replace(path, before, after):
+                raise OSError("File changed during batch edit")
+            if kind == "replace":
+                applied.append((path, before, after))
+    except (OSError, UnicodeError) as exc:
+        rollback_failed = False
+        for path, before, after in reversed(applied):
+            try:
+                if before is None:
+                    if path.read_bytes() != after:
+                        rollback_failed = True
+                    else:
+                        path.unlink()
+                elif not _atomic_replace(path, after, before):
+                    rollback_failed = True
+            except OSError:
+                rollback_failed = True
+        if not rollback_failed:
+            for checkpoint_id in saved:
+                checkpoints.discard(checkpoint_id)
+        detail = (
+            "Some files may need checkpoint recovery."
+            if rollback_failed
+            else "Changes were rolled back."
+        )
+        return ToolResult(f"Batch edit failed: {exc}. {detail}", True)
+
+    output = []
+    for (path, before, after, kind), checkpoint_id in zip(planned, saved, strict=True):
+        diff = _format_diff(
+            path,
+            workspace,
+            before.decode("utf-8") if before is not None else "",
+            after.decode("utf-8"),
+            created=kind == "create",
+        )
+        output.append(
+            f"{kind} {_display_path(path, workspace)}\n"
+            f"Checkpoint: {checkpoint_id}\n{diff}"
+        )
+    return ToolResult("\n\n".join(output))
+
+
+def git_review(tool_input: object, workspace: Path) -> ToolResult:
+    """Return a bounded, read-only Git diff or precommit whitespace check."""
+    if (
+        not isinstance(tool_input, dict)
+        or set(tool_input) != {"mode"}
+        or tool_input["mode"] not in {"diff", "precommit"}
+    ):
+        return ToolResult("git_review mode must be diff or precommit.", True)
+    workspace = workspace.resolve()
+    commands = [["git", "status", "--porcelain=v1", "--untracked-files=normal"]]
+    if tool_input["mode"] == "diff":
+        commands.extend(
+            [
+                ["git", "diff", "--no-ext-diff", "--no-textconv", "--cached", "--"],
+                ["git", "diff", "--no-ext-diff", "--no-textconv", "--"],
+            ]
+        )
+    else:
+        commands.extend(
+            [["git", "diff", "--cached", "--check"], ["git", "diff", "--check"]]
+        )
+    labels = (
+        ["Status", "Staged diff", "Unstaged diff"]
+        if tool_input["mode"] == "diff"
+        else ["Status", "Staged whitespace check", "Unstaged whitespace check"]
+    )
+    sections = []
+    errors = False
+    for label, command in zip(labels, commands, strict=True):
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return ToolResult(f"Git review failed: {type(exc).__name__}.", True)
+        if completed.returncode:
+            errors = True
+        content = (completed.stdout + completed.stderr).strip() or "[none]"
+        if len(content) > 20_000:
+            content = content[:20_000] + "\n[Output truncated after 20000 characters.]"
+        sections.append(f"{label} (exit {completed.returncode}):\n{content}")
+        if label == "Status" and completed.returncode:
+            break
+    return ToolResult("\n\n".join(sections), errors)
 
 
 def list_edit_checkpoints(

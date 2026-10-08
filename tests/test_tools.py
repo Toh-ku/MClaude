@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 from mclaude.tools import (
+    apply_edits,
     create_file,
     find_files,
+    git_review,
     read_file,
     replace_text,
     run_command,
@@ -289,6 +291,124 @@ def test_file_edit_tools_validate_inputs_and_limits(tmp_path: Path) -> None:
     assert all(result.is_error for result in results)
     assert "edit limit" in results[-1].content
     assert target.read_text(encoding="utf-8") == "abcdef"
+
+
+def test_apply_edits_changes_multiple_files_and_keeps_checkpoints(
+    tmp_path: Path,
+) -> None:
+    from mclaude.checkpoints import CheckpointStore
+
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    checkpoints = CheckpointStore(tmp_path, root=tmp_path / "state")
+    result = apply_edits(
+        {
+            "edits": [
+                {
+                    "kind": "replace",
+                    "path": "source.py",
+                    "old_text": "1",
+                    "new_text": "2",
+                },
+                {"kind": "create", "path": "new.py", "content": "ready = True\n"},
+            ]
+        },
+        tmp_path,
+        checkpoints=checkpoints,
+    )
+
+    assert result.is_error is False
+    assert source.read_text(encoding="utf-8") == "value = 2\n"
+    assert (tmp_path / "new.py").read_text(encoding="utf-8") == "ready = True\n"
+    assert len(checkpoints.list()) == 2
+    assert "+value = 2" in result.content
+    assert "+++ b/new.py" in result.content
+
+
+def test_apply_edits_preflights_entire_batch(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    result = apply_edits(
+        {
+            "edits": [
+                {
+                    "kind": "replace",
+                    "path": "source.py",
+                    "old_text": "1",
+                    "new_text": "2",
+                },
+                {
+                    "kind": "replace",
+                    "path": "missing.py",
+                    "old_text": "a",
+                    "new_text": "b",
+                },
+            ]
+        },
+        tmp_path,
+    )
+
+    assert result.is_error is True
+    assert source.read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_apply_edits_rolls_back_after_later_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mclaude.tools as tools
+
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("a", encoding="utf-8")
+    second.write_text("b", encoding="utf-8")
+    original_replace = tools._atomic_replace
+
+    def fail_second(path, before, after):
+        if path == second:
+            return False
+        return original_replace(path, before, after)
+
+    monkeypatch.setattr(tools, "_atomic_replace", fail_second)
+    result = apply_edits(
+        {
+            "edits": [
+                {
+                    "kind": "replace",
+                    "path": "first.py",
+                    "old_text": "a",
+                    "new_text": "A",
+                },
+                {
+                    "kind": "replace",
+                    "path": "second.py",
+                    "old_text": "b",
+                    "new_text": "B",
+                },
+            ]
+        },
+        tmp_path,
+    )
+
+    assert result.is_error is True
+    assert "rolled back" in result.content
+    assert first.read_text(encoding="utf-8") == "a"
+    assert second.read_text(encoding="utf-8") == "b"
+
+
+def test_git_review_shows_diff_and_precommit_errors(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.py"], cwd=tmp_path, check=True)
+    diff = git_review({"mode": "diff"}, tmp_path)
+    assert diff.is_error is False
+    assert "A  source.py" in diff.content
+    assert "+value = 1" in diff.content
+
+    source.write_text("value = 1  \n", encoding="utf-8")
+    check = git_review({"mode": "precommit"}, tmp_path)
+    assert check.is_error is True
+    assert "trailing whitespace" in check.content
 
 
 def test_run_command_captures_output_and_exit_code(tmp_path: Path) -> None:
