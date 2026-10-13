@@ -1,0 +1,29 @@
+{
+  "type": "array",
+  "maxItems": 100,
+  "items": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "description": {
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "in_progress",
+          "completed",
+          "blocked"
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "description",
+      "status"
+    ],
+    "additionalProperties": false
+  }
+}

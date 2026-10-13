@@ -1,0 +1,51 @@
+{
+  "name": "mclaude",
+  "version": "0.1.0",
+  "description": "A local-first TypeScript coding agent for the terminal.",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "bin": {
+    "mclaude": "dist/cli/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-contracts.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/tests/*.test.js",
+    "lint": "eslint src tests scripts",
+    "format": "prettier --write src tests scripts *.json *.mjs",
+    "format:check": "prettier --check src tests scripts *.json *.mjs",
+    "start": "node dist/cli/main.js",
+    "prepack": "npm run build",
+    "package:smoke": "node scripts/package-smoke.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "ajv": "^8.20.0",
+    "diff": "^9.0.0",
+    "ignore": "^7.0.12",
+    "minimatch": "^10.2.6",
+    "string-width": "^8.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.12.0",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.2"
+  }
+}

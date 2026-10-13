@@ -1,9 +1,9 @@
 const examples = {
-  plan: { command: 'uv run mclaude --plan "分析项目，制定重构计划"', content: '<p class="terminal-label">MCLAUDE / PLAN MODE</p><p class="dim">✓ 读取项目目录与规则文件<br>✓ 搜索模块引用与调用关系<br>✓ 整理需要关注的代码路径</p><p>可以分三步推进：<br><br>  01 &nbsp;梳理当前模块的职责边界<br>  02 &nbsp;提取重复逻辑，保留现有接口<br>  03 &nbsp;运行相关测试，检查改动</p><div class="result">只读规划完成。等你决定下一步。 <span class="cursor"></span></div>' },
-  edit: { command: 'uv run mclaude "提取重复逻辑，保持现有行为"', content: '<p class="terminal-label">MCLAUDE / PERMISSION REQUIRED</p><p class="dim">✓ 读取相关实现<br>✓ 定位需要替换的代码段</p><p>拟执行操作：replace_text<br><br>  文件 &nbsp;src/example.py（示例）<br>  变更 &nbsp;将重复逻辑提取为辅助函数</p><div class="result">写入前请求你的确认。<br>你可以允许本次操作，也可以拒绝。 <span class="cursor"></span></div>' },
-  resume: { command: 'uv run mclaude --continue', content: '<p class="terminal-label">MCLAUDE / RESUME SESSION</p><p class="dim">✓ 载入最近会话<br>✓ 恢复消息历史</p><p>接着上一次的思路，继续推进任务。<br><br>会话恢复会重建消息历史，<br>不会重放历史工具调用。</p><div class="result">准备好了。下一步想做什么？ <span class="cursor"></span></div>' }
+  plan: { command: 'node dist/cli/main.js --plan "分析项目，制定重构计划"', content: '<p class="terminal-label">MCLAUDE / PLAN MODE</p><p class="dim">✓ 读取项目目录与规则文件<br>✓ 搜索模块引用与调用关系<br>✓ 整理需要关注的代码路径</p><p>可以分三步推进：<br><br>  01 &nbsp;梳理当前模块的职责边界<br>  02 &nbsp;提取重复逻辑，保留现有接口<br>  03 &nbsp;运行相关测试，检查改动</p><div class="result">只读规划完成。等你决定下一步。 <span class="cursor"></span></div>' },
+  edit: { command: 'node dist/cli/main.js "提取重复逻辑，保持现有行为"', content: '<p class="terminal-label">MCLAUDE / PERMISSION REQUIRED</p><p class="dim">✓ 读取相关实现<br>✓ 定位需要替换的代码段</p><p>拟执行操作：replace_text<br><br>  文件 &nbsp;src/example.ts（示例）<br>  变更 &nbsp;将重复逻辑提取为辅助函数</p><div class="result">写入前请求你的确认。<br>你可以允许本次操作，也可以拒绝。 <span class="cursor"></span></div>' },
+  resume: { command: 'node dist/cli/main.js --continue', content: '<p class="terminal-label">MCLAUDE / RESUME SESSION</p><p class="dim">✓ 载入最近会话<br>✓ 恢复消息历史</p><p>接着上一次的思路，继续推进任务。<br><br>会话恢复会重建消息历史，<br>不会重放历史工具调用。</p><div class="result">准备好了。下一步想做什么？ <span class="cursor"></span></div>' }
 };
-const installCommands = { windows: 'git clone https://github.com/Toh-ku/MClaude.git\nSet-Location MClaude\nuv sync --locked\nuv run mclaude', unix: 'git clone https://github.com/Toh-ku/MClaude.git\ncd MClaude\nuv sync --locked\nuv run mclaude' };
+const installCommands = { windows: 'git clone https://github.com/Toh-ku/MClaude.git\nSet-Location MClaude/ts\nnpm ci\nnpm run build\nnode dist/cli/main.js', unix: 'git clone https://github.com/Toh-ku/MClaude.git\ncd MClaude/ts\nnpm ci\nnpm run build\nnode dist/cli/main.js' };
 let activeOS = 'windows';
 function setupTabs(selector, onSelect) {
   const tabs = [...document.querySelectorAll(selector)];

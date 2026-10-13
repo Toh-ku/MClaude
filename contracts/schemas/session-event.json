@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["seq", "timestamp", "type"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string" },
+    "type": { "enum": ["session.created", "message.appended", "tool.result", "turn.finished", "tasks.updated", "context.compacted", "session.named"] },
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "workspace": { "type": "string" },
+    "model": { "type": "string" },
+    "message": { "$ref": "#/definitions/message" },
+    "result": { "$ref": "#/definitions/toolResult" },
+    "status": { "enum": ["ok", "error", "cancelled", "truncated"] },
+    "tasks": { "$ref": "tasks.json" },
+    "history": { "type": "array", "items": { "$ref": "#/definitions/message" } },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    { "properties": { "type": { "const": "session.created" }, "seq": { "const": 0 } }, "required": ["version", "id", "workspace", "model"] },
+    { "properties": { "type": { "const": "message.appended" } }, "required": ["message"] },
+    { "properties": { "type": { "const": "tool.result" } }, "required": ["result"] },
+    { "properties": { "type": { "const": "turn.finished" } }, "required": ["status"] },
+    { "properties": { "type": { "const": "tasks.updated" } }, "required": ["tasks"] },
+    { "properties": { "type": { "const": "context.compacted" } }, "required": ["history"] },
+    { "properties": { "type": { "const": "session.named" } }, "required": ["name"] }
+  ],
+  "definitions": {
+    "toolResult": {
+      "type": "object",
+      "properties": { "type": { "const": "tool_result" }, "tool_use_id": { "type": "string" }, "content": { "type": "string" }, "is_error": { "type": "boolean" } },
+      "required": ["type", "tool_use_id", "content", "is_error"],
+      "additionalProperties": false
+    },
+    "assistantBlock": {
+      "oneOf": [
+        { "type": "object", "properties": { "type": { "const": "text" }, "text": { "type": "string" } }, "required": ["type", "text"], "additionalProperties": false },
+        { "type": "object", "properties": { "type": { "const": "tool_use" }, "id": { "type": "string" }, "name": { "type": "string" }, "input": { "type": "object" } }, "required": ["type", "id", "name", "input"], "additionalProperties": false }
+      ]
+    },
+    "message": {
+      "oneOf": [
+        { "type": "object", "properties": { "role": { "const": "user" }, "content": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "$ref": "#/definitions/toolResult" } }] } }, "required": ["role", "content"], "additionalProperties": false },
+        { "type": "object", "properties": { "role": { "const": "assistant" }, "content": { "type": "array", "items": { "$ref": "#/definitions/assistantBlock" } } }, "required": ["role", "content"], "additionalProperties": false }
+      ]
+    }
+  }
+}

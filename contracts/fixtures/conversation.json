@@ -1,0 +1,12 @@
+{
+  "config": { "version": 1, "api_key": "fixture-key-not-a-real-secret", "model": "fixture-model", "base_url": "" },
+  "tasks": [{ "id": "step-1", "description": "保留中文任务", "status": "in_progress" }],
+  "history": [
+    { "role": "user", "content": "跨语言会话：保留原始目标" },
+    { "role": "assistant", "content": [{ "type": "tool_use", "id": "read-1", "name": "read_file", "input": { "path": "example.txt" } }] },
+    { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "read-1", "content": "你好😀\r\n", "is_error": false }] },
+    { "role": "assistant", "content": [{ "type": "text", "text": "已完成读取" }] }
+  ],
+  "before": "你好😀\r\noriginal",
+  "after": "changed\r\n内容"
+}

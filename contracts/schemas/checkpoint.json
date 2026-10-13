@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "workspace": { "type": "string" },
+    "path": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string" },
+    "before": { "type": ["string", "null"] },
+    "before_mode": { "type": ["integer", "null"] },
+    "after_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "restored": { "type": "boolean" },
+    "restored_at": { "type": "string" }
+  },
+  "required": ["version", "id", "workspace", "path", "created_at", "before", "before_mode", "after_sha256", "restored"]
+}

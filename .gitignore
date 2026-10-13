@@ -12,6 +12,12 @@ htmlcov/
 build/
 dist/
 
+# TypeScript build and test artifacts
+node_modules/
+.test-build/
+*.tsbuildinfo
+*.tgz
+
 # Local configuration and credentials
 .env
 .env.*
@@ -23,6 +29,7 @@ dist/
 Thumbs.db
 
 docs/
+benchmarks/
 
 # Official website source and local publishing artifacts
 !website/dist/

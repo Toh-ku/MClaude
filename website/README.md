@@ -22,3 +22,5 @@ node website/serve.mjs
 
 当前仅提供项目源码与本地预览，不进行线上发布。
 终端内容为工作流示意，不会执行命令或请求模型 API。所有产品描述依据项目 README。
+
+安装与工作流示例默认展示 `ts/` 下的 TypeScript 实现；Python 使用方式见仓库根 README 与 `python/README.md`。
