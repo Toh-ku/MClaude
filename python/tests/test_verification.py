@@ -8,6 +8,146 @@ from mclaude.permissions import PermissionGate
 from mclaude.provider import ModelResponse, TextBlock, ToolUseBlock
 from mclaude.tools import ToolResult
 from mclaude.verification import VerificationWorkflow
+from mclaude.workspace_version import workspace_version
+
+
+def test_passed_checks_bind_to_contents_and_retest(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "mclaude.verification.run_command", lambda *_: ToolResult("passed")
+    )
+    target = tmp_path / "module.py"
+    target.write_text("value = 1\n")
+    workflow = VerificationWorkflow()
+    workflow.run({"checks": [{"command": "pytest"}]}, tmp_path)
+    version = workflow.version
+    workflow.refresh(tmp_path)
+    assert workflow.state == "passed"
+    target.write_text("value = 2\n")
+    workflow.refresh(tmp_path)
+    assert workflow.state == "stale"
+    workflow.run({}, tmp_path, retest=True)
+    assert workflow.state == "passed"
+    assert workflow.version != version
+
+
+def test_version_tracks_untracked_files_but_ignores_artifacts(tmp_path):
+    (tmp_path / ".gitignore").write_text("dist/\n")
+    before = workspace_version(tmp_path)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "build.py").write_text("artifact")
+    assert workspace_version(tmp_path) == before
+    (tmp_path / "new.py").write_text("source")
+    assert workspace_version(tmp_path) != before
+    (tmp_path / "new.py").unlink()
+    assert workspace_version(tmp_path) == before
+
+
+def test_check_source_mutation_is_stale_even_when_command_succeeds(
+    tmp_path, monkeypatch
+):
+    def command(*_):
+        (tmp_path / "module.py").write_text("changed")
+        return ToolResult("passed")
+
+    monkeypatch.setattr("mclaude.verification.run_command", command)
+    workflow = VerificationWorkflow()
+    result = workflow.run({"checks": [{"command": "format-and-test"}]}, tmp_path)
+    assert result.is_error
+    assert workflow.state == "stale"
+    assert "changed during verification" in result.content
+
+
+def test_unreadable_ignore_rules_fail_closed(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "mclaude.verification.run_command",
+        lambda *_: calls.append(1) or ToolResult("passed"),
+    )
+    workflow = VerificationWorkflow()
+    workflow.run({"checks": [{"command": "pytest"}]}, tmp_path)
+    (tmp_path / ".gitignore").write_bytes(b"\xff")
+    workflow.refresh(tmp_path)
+    assert workflow.state == "stale"
+    assert workflow.run({"checks": [{"command": "pytest"}]}, tmp_path).is_error
+    assert len(calls) == 1
+
+
+def test_agent_detects_command_edits_before_next_request(tmp_path, monkeypatch):
+    target = tmp_path / "module.py"
+    target.write_text("before")
+    monkeypatch.setattr(
+        "mclaude.verification.run_command", lambda *_: ToolResult("passed")
+    )
+
+    def command(*_):
+        target.write_text("after")
+        return ToolResult("edited")
+
+    monkeypatch.setattr("mclaude.agent.run_command", command)
+    responses = iter(
+        [
+            ModelResponse(
+                (
+                    ToolUseBlock(
+                        "check", "run_checks", {"checks": [{"command": "pytest"}]}
+                    ),
+                    ToolUseBlock("edit", "run_command", {"command": "format"}),
+                ),
+                "tool_use",
+            ),
+            ModelResponse((TextBlock("done"),), "end_turn"),
+        ]
+    )
+    systems = []
+
+    def request(*_, **kwargs):
+        systems.append(kwargs.get("system", ""))
+        return next(responses)
+
+    workflow = VerificationWorkflow()
+    run_agent(
+        "check then edit",
+        ModelConfig(api_key="test", model="test"),
+        workspace=tmp_path,
+        request=request,
+        permission_gate=PermissionGate(prompt=lambda *_: True),
+        allow_host_commands=True,
+        verification=workflow,
+    )
+    assert workflow.state == "stale"
+    assert "Development checks: stale" in systems[-1]
+
+
+def test_source_changes_during_model_response_require_new_response(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "mclaude.verification.run_command", lambda *_: ToolResult("passed")
+    )
+    target = tmp_path / "module.py"
+    target.write_text("before")
+    workflow = VerificationWorkflow()
+    workflow.run({"checks": [{"command": "pytest"}]}, tmp_path)
+    requests = []
+
+    def request(*_, **kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            target.write_text("after")
+            return ModelResponse((TextBlock("All checks passed"),), "end_turn")
+        assert "Development checks: stale" in kwargs["system"]
+        return ModelResponse((TextBlock("Code changed; retest required"),), "end_turn")
+
+    result = run_agent(
+        "Report verification",
+        ModelConfig(api_key="test", model="test"),
+        workspace=tmp_path,
+        request=request,
+        allow_host_commands=True,
+        verification=workflow,
+    )
+    assert len(requests) == 2
+    assert "retest required" in result.text
 
 
 def test_verification_stops_at_failure_and_retests(tmp_path: Path, monkeypatch) -> None:

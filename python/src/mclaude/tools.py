@@ -278,7 +278,7 @@ def _resolve_in_workspace(path_value: str, workspace: Path) -> Path | None:
     return resolved if resolved.is_relative_to(workspace) else None
 
 
-def _workspace_files(workspace: Path):
+def _workspace_files(workspace: Path, *, strict: bool = False):
     """Yield safe workspace files in stable path order, honoring .gitignore."""
 
     def walk(directory: Path, rules: tuple[tuple[Path, GitIgnoreSpec], ...]):
@@ -289,6 +289,8 @@ def _workspace_files(workspace: Path):
                 lines = ignore_file.read_text(encoding="utf-8").splitlines()
                 rules = (*rules, (directory, GitIgnoreSpec.from_lines(lines)))
         except (OSError, UnicodeError):
+            if strict:
+                raise
             # An unreadable ignore file must not make its directory searchable.
             return
         try:
@@ -296,6 +298,8 @@ def _workspace_files(workspace: Path):
                 directory.iterdir(), key=lambda entry: entry.name.casefold()
             )
         except OSError:
+            if strict:
+                raise
             return
         for entry in entries:
             check_read_cancelled()
@@ -305,6 +309,8 @@ def _workspace_files(workspace: Path):
                 is_dir = entry.is_dir()
                 resolved = entry.resolve()
             except OSError:
+                if strict:
+                    raise
                 continue
             if not resolved.is_relative_to(workspace):
                 continue

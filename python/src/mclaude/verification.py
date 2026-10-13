@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from mclaude.tools import ToolResult, run_command
+from mclaude.workspace_version import workspace_version
 
 RUN_CHECKS_DEFINITION = {
     "name": "run_checks",
@@ -61,6 +62,20 @@ class VerificationWorkflow:
     checks: list[dict[str, Any]] = field(default_factory=list)
     attempts: int = 0
     state: str = "not_run"
+    version: str | None = None
+    workspace_root: Path | None = None
+
+    def refresh(self, workspace: Path) -> None:
+        if self.state != "passed":
+            return
+        try:
+            if (
+                self.workspace_root != workspace.resolve()
+                or self.version != workspace_version(workspace)
+            ):
+                self.state = "stale"
+        except (OSError, UnicodeError):
+            self.state = "stale"
 
     def current_checks(self) -> list[dict[str, Any]]:
         return [check.copy() for check in self.checks]
@@ -75,6 +90,7 @@ class VerificationWorkflow:
         commands = "; ".join(check["command"] for check in self.checks)
         return (
             f"Development checks: {self.state} after {self.attempts} run(s). "
+            f"Workspace version: {self.version or 'unavailable'}. "
             f"Commands: {commands}. If failed or stale, inspect/fix and call "
             "retest_checks before reporting verification as passed."
         )
@@ -110,6 +126,15 @@ class VerificationWorkflow:
 
         self.checks = checks
         self.attempts += 1
+        self.state = "failed"
+        self.version = None
+        self.workspace_root = workspace.resolve()
+        try:
+            before = workspace_version(workspace)
+        except (OSError, UnicodeError):
+            return ToolResult(
+                "Cannot establish workspace version; checks were not run.", True
+            )
         outputs = []
         for index, check in enumerate(checks, 1):
             result = run_command(check, workspace)
@@ -124,7 +149,24 @@ class VerificationWorkflow:
                     + "\n\n".join(outputs),
                     True,
                 )
+        try:
+            self.version = workspace_version(workspace)
+        except (OSError, UnicodeError):
+            self.state = "stale"
+            return ToolResult(
+                "Checks exited successfully, but workspace version could not be "
+                "established. Retest required.\n\n" + "\n\n".join(outputs),
+                True,
+            )
+        if before != self.version:
+            self.state = "stale"
+            return ToolResult(
+                "Checks exited successfully, but workspace changed during "
+                "verification. Retest required.\n\n" + "\n\n".join(outputs),
+                True,
+            )
         self.state = "passed"
         return ToolResult(
-            f"Verification attempt {self.attempts} passed.\n\n" + "\n\n".join(outputs)
+            f"Verification attempt {self.attempts} passed. "
+            f"Workspace version: {self.version}.\n\n" + "\n\n".join(outputs)
         )

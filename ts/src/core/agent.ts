@@ -195,6 +195,7 @@ export async function runAgent(
   await append({ role: "user", content: prompt });
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     checkCancelled(signal);
+    await verification.refresh(options.workspace, signal);
     const system =
       base +
       (tasks.tasks.length ? "\nCurrent task state:\n" + tasks.render() : "") +
@@ -274,10 +275,20 @@ export async function runAgent(
     }
     const calls = response.content.filter((b) => b.type === "tool_use");
     if (response.stop_reason === "end_turn") {
+      const wasPassed = verification.state === "passed";
+      await verification.refresh(options.workspace, signal);
       if (calls.length)
         throw new ModelError("The model ended while requesting a tool.");
       if (!text.trim()) throw new ModelError("The model returned no text.");
       await append({ role: "assistant", content: response.content });
+      if (wasPassed && verification.state === "stale") {
+        await append({
+          role: "user",
+          content:
+            "The workspace changed while this response was being generated. Previous checks are stale. Inspect or retest the current code before making verification claims.",
+        });
+        continue;
+      }
       return { text, truncated: false };
     }
     if (response.stop_reason !== "tool_use" || !calls.length)
@@ -360,7 +371,7 @@ export async function runAgent(
     };
     const execute = async (call: ToolUseBlock): Promise<ToolResult> => {
       const run = () => registry.execute(call.name, call.input);
-      return options.hooks && !options.planning
+      const result = await (options.hooks && !options.planning
         ? options.hooks.execute(
             call.name,
             call.input,
@@ -368,7 +379,9 @@ export async function runAgent(
             run,
             signal,
           )
-        : run();
+        : run());
+      await verification.refresh(options.workspace, signal);
+      return result;
     };
     try {
       await scheduler.run(calls, prepare, execute, record, signal);

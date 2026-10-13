@@ -226,6 +226,7 @@ def run_agent(
         on_history_event("message", user_message)
 
     for iteration in range(1, max_iterations + 1):
+        verification.refresh(workspace)
         system_prompt = base_system_prompt
         if task_board.tasks:
             system_prompt += "\nCurrent task state:\n" + task_board.render()
@@ -327,6 +328,8 @@ def run_agent(
             return AgentResponse(text=text, truncated=True)
 
         if response.stop_reason == "end_turn":
+            was_passed = verification.state == "passed"
+            verification.refresh(workspace)
             if any(isinstance(block, ToolUseBlock) for block in response.content):
                 raise ModelError("The model ended while requesting a tool.")
             if not text.strip():
@@ -338,6 +341,20 @@ def run_agent(
             messages.append(final_message)
             if on_history_event is not None:
                 on_history_event("message", final_message)
+            if was_passed and verification.state == "stale":
+                changed_message = {
+                    "role": "user",
+                    "content": (
+                        "The workspace changed while this response was "
+                        "being generated. "
+                        "Previous checks are stale. Inspect or retest the current code "
+                        "before making verification claims."
+                    ),
+                }
+                messages.append(changed_message)
+                if on_history_event is not None:
+                    on_history_event("message", changed_message)
+                continue
             return AgentResponse(text=text)
 
         if response.stop_reason != "tool_use":
@@ -442,11 +459,13 @@ def run_agent(
                     verification.mark_edited()
                 return result
 
-            return (
+            result = (
                 hooks.execute(call.name, call.input, workspace, execute)
                 if hooks is not None and not planning
                 else execute()
             )
+            verification.refresh(workspace)
+            return result
 
         def record_result(
             call: ToolUseBlock,

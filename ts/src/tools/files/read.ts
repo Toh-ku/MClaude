@@ -26,6 +26,7 @@ interface IgnoreLayer {
 export async function* workspaceFiles(
   workspace: WorkspaceFS,
   signal?: AbortSignal,
+  strict = false,
 ): AsyncGenerator<string> {
   async function* walk(
     directory: string,
@@ -42,12 +43,16 @@ export async function* workspaceFiles(
           matcher: ignore().add(utf8(await readBounded(ignoreFile, 1000000))),
         });
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return;
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        if (strict) throw e;
+        return;
+      }
     }
     let entries: Dirent[];
     try {
       entries = await fs.readdir(directory, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      if (strict) throw e;
       return;
     }
     entries.sort((a, b) =>
@@ -64,7 +69,15 @@ export async function* workspaceFiles(
       let resolved: string;
       try {
         resolved = await workspace.resolve(file);
-      } catch {
+      } catch (e) {
+        if (
+          strict &&
+          !(
+            e instanceof MClaudeError &&
+            e.message === "Path is outside the workspace."
+          )
+        )
+          throw e;
         continue;
       }
       let isDirectory = entry.isDirectory();
@@ -74,7 +87,8 @@ export async function* workspaceFiles(
           const stat = await fs.stat(resolved);
           isDirectory = stat.isDirectory();
           isFile = stat.isFile();
-        } catch {
+        } catch (e) {
+          if (strict) throw e;
           continue;
         }
       }

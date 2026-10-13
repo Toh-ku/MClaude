@@ -53,6 +53,8 @@ Windows 默认用户目录为 `%LOCALAPPDATA%/MClaude`。Linux/macOS 配置使�
 
 `--allow-host-commands` 启用命令工具，每次仍需确认；这是宿主机执行，不提供 OS 沙箱。`run_checks` 顺序运行最多 5 项，失败后 `retest_checks` 重新确认并执行原命令组。检查通过后尝试编辑会保守标记为 stale。
 
+检查结果绑定工作区内容的 SHA-256 指纹，包含可发现文件的路径、权限和原始字节，支持没有 Git 的目录及未跟踪文件；遵守 `.gitignore`，排除 `.git`、Agent 会话、检查点及登录配置。忽略文件不属于验证版本范围。检查前后源码必须一致；命令、MCP、Hooks 和外部编辑造成版本变化后，下一次工具结果、模型请求或结束回答前会将旧检查标为 stale。无法读取完整版本时不会宣称通过。验证状态仍只保留在当前进程，恢复会话后需要重新运行检查。
+
 规则从工作区根到当前目录加载 `AGENTS.md`、`CLAUDE.md`，同层后者后加载。技能放在 `.mclaude/skills/<name>/SKILL.md`，只有显式 `load_skill` 才加载正文。
 
 扩展显式启用：
