@@ -3,12 +3,15 @@ import {
   PermissionGate,
   READ_ONLY_TOOLS,
   COMMAND_TOOLS,
+  EDIT_TOOLS,
 } from "../security/permissions.js";
 import { CheckpointStore } from "../persistence/checkpoints.js";
 import { SessionStore } from "../persistence/session.js";
+import { validId } from "../persistence/paths.js";
 import { SkillCatalog } from "../integrations/skills.js";
 import {
   loadInstructions,
+  InstructionTracker,
   type ProjectInstructions,
 } from "../integrations/instructions.js";
 import type { HookRunner } from "../integrations/hooks.js";
@@ -26,6 +29,8 @@ import {
   checkCancelled,
   fail,
   clip,
+  safeError,
+  isObject,
   codePoints,
   type AgentResponse,
   type ModelProvider,
@@ -99,6 +104,10 @@ export async function runAgent(
   const skills = await SkillCatalog.discover(options.workspace);
   const instructions =
     options.instructions ?? (await loadInstructions(options.workspace));
+  const instructionTracker = new InstructionTracker(
+    options.workspace,
+    instructions,
+  );
   if (options.mcp && !options.planning) await options.mcp.connect(signal);
   let remaining = subagentBudget;
   const delegate = async (
@@ -150,9 +159,41 @@ export async function runAgent(
       throw e;
     }
   };
+  const checkpoints =
+    options.checkpoints ?? new CheckpointStore(options.workspace);
+  const targetPaths = async (call: ToolUseBlock): Promise<string[]> => {
+    if (
+      ["read_file", "create_file", "replace_text", "search_text"].includes(
+        call.name,
+      )
+    ) {
+      const input = validateInput(call.name, call.input);
+      return [typeof input["path"] === "string" ? input["path"] : "."];
+    }
+    if (call.name === "apply_edits") {
+      const input = validateInput(call.name, call.input);
+      return (input["edits"] as unknown[])
+        .filter(isObject)
+        .map((edit) => stringInput(edit, "path"));
+    }
+    if (call.name === "restore_edit_checkpoint") {
+      const input = validateInput(call.name, call.input);
+      const id = validId(stringInput(input, "checkpoint_id"));
+      const checkpoint = (await checkpoints.list()).find(
+        (item) => item.id === id,
+      );
+      return checkpoint ? [checkpoint.path] : [];
+    }
+    return [];
+  };
+  const rulesRequired = (rules: string): ToolResult =>
+    fail(
+      "Project instructions for the target files are new or changed. No file changes were made. Review these rules and retry the operation in the next model request.\n\n" +
+        rules,
+    );
   const registry = new ToolRegistry({
     workspace: options.workspace,
-    checkpoints: options.checkpoints ?? new CheckpointStore(options.workspace),
+    checkpoints,
     sessions: options.sessions ?? new SessionStore(),
     tasks,
     verification,
@@ -175,7 +216,7 @@ export async function runAgent(
     options.contextBudget ?? 100000,
     options.maxTokens,
   );
-  let base = instructions.system;
+  let base = "";
   if (skills.skills.size)
     base += "\nAvailable skills (load on demand):\n" + skills.summary();
   if (options.planning)
@@ -197,6 +238,7 @@ export async function runAgent(
     checkCancelled(signal);
     await verification.refresh(options.workspace, signal);
     const system =
+      (await instructionTracker.beginRequest()) +
       base +
       (tasks.tasks.length ? "\nCurrent task state:\n" + tasks.render() : "") +
       (options.allowHostCommands && verification.state !== "not_run"
@@ -353,6 +395,12 @@ export async function runAgent(
         return fail("Tool is blocked in planning mode.");
       if (call.name === "retest_checks" && !verification.checks.length)
         return fail("No prior checks are available to retest.");
+      try {
+        const rules = await instructionTracker.inspect(await targetPaths(call));
+        if (rules && EDIT_TOOLS.has(call.name)) return rulesRequired(rules);
+      } catch (e) {
+        return fail(safeError(e));
+      }
       const decision = await gate.check(
         {
           tool_name: call.name,
@@ -370,7 +418,23 @@ export async function runAgent(
         );
     };
     const execute = async (call: ToolUseBlock): Promise<ToolResult> => {
-      const run = () => registry.execute(call.name, call.input);
+      const run = async (): Promise<ToolResult> => {
+        // Recheck after permission prompts and before hooks hand control to tools.
+        let rules: string | undefined;
+        try {
+          rules = await instructionTracker.inspect(await targetPaths(call));
+          if (rules && EDIT_TOOLS.has(call.name)) return rulesRequired(rules);
+        } catch (e) {
+          return fail(safeError(e));
+        }
+        const result = await registry.execute(call.name, call.input);
+        return rules
+          ? {
+              ...result,
+              content: rules + "\n\nTool result:\n" + result.content,
+            }
+          : result;
+      };
       const result = await (options.hooks && !options.planning
         ? options.hooks.execute(
             call.name,

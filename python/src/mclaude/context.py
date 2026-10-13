@@ -42,9 +42,10 @@ class ProjectInstructions:
         if not self.sources:
             return None
         sections = [
-            "Follow the project instructions below. Later, more narrowly scoped "
-            "files take precedence when instructions conflict. Each section states "
-            "its source and scope."
+            "Follow the project instructions below only for files within each stated "
+            "scope. More narrowly scoped instructions take precedence for that file; "
+            "sibling scopes never override one another. Within the same directory "
+            "CLAUDE.md follows AGENTS.md."
         ]
         for source in self.sources:
             relative_source = source.path.relative_to(self.workspace).as_posix()
@@ -354,3 +355,79 @@ def load_project_instructions(
         working_directory=working_directory,
         sources=tuple(sources),
     )
+
+
+def instructions_for_path(workspace: Path, target: str) -> ProjectInstructions:
+    workspace = workspace.resolve()
+    file = (workspace / target).resolve()
+    if not file.is_relative_to(workspace):
+        raise ContextError("Path is outside the workspace.")
+    directory = file if file.is_dir() else file.parent
+    while not directory.exists() and directory != workspace:
+        directory = directory.parent
+    return load_project_instructions(workspace, directory)
+
+
+class InstructionTracker:
+    """Track disk rules actually supplied to a model request, by file scope."""
+
+    def __init__(self, workspace: Path, initial: ProjectInstructions):
+        self.workspace = workspace
+        self.initial = initial
+        self.targets = {str(source.scope) for source in initial.sources}
+        self.delivered: dict[Path, str] = {}
+
+    def begin_request(self) -> str:
+        sources = {
+            source.path: source
+            for source in load_project_instructions(self.workspace).sources
+        }
+        for target in sorted(self.targets):
+            for source in instructions_for_path(self.workspace, target).sources:
+                sources[source.path] = source
+        ordered = sorted(
+            sources.values(),
+            key=lambda source: (
+                len(source.scope.relative_to(self.workspace).parts),
+                source.path.relative_to(self.workspace).as_posix(),
+            ),
+        )
+        self.delivered = {source.path: source.content for source in ordered}
+        return (
+            ProjectInstructions(
+                self.workspace, self.workspace, tuple(ordered)
+            ).system_prompt()
+            or ""
+        )
+
+    def inspect(self, targets: list[str]) -> str | None:
+        unseen: dict[Path, InstructionSource] = {}
+        removed: set[Path] = set()
+        for target in targets:
+            applicable = instructions_for_path(self.workspace, target)
+            self.targets.add(target)
+            current = {source.path for source in applicable.sources}
+            resolved = (self.workspace / target).resolve()
+            removed.update(
+                source
+                for source in self.delivered
+                if source not in current and resolved.is_relative_to(source.parent)
+            )
+            for source in applicable.sources:
+                if self.delivered.get(source.path) != source.content:
+                    unseen[source.path] = source
+        if not unseen and not removed:
+            return None
+        prompt = ProjectInstructions(
+            self.workspace, self.workspace, tuple(unseen.values())
+        ).system_prompt()
+        removed_names = [
+            source.relative_to(self.workspace).as_posix() for source in sorted(removed)
+        ]
+        return (
+            "\n".join(
+                f"Previously supplied rule removed: {name}" for name in removed_names
+            )
+            + "\n"
+            + (prompt or "")
+        )

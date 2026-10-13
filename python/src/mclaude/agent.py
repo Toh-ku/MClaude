@@ -12,6 +12,8 @@ from mclaude.context import (
     DEFAULT_CONTEXT_BUDGET_TOKENS,
     ContextBudget,
     ContextBudgetExceeded,
+    ContextError,
+    InstructionTracker,
     ProjectInstructions,
     compact_history,
     load_project_instructions,
@@ -173,8 +175,8 @@ def run_agent(
     workspace = (workspace or Path.cwd()).resolve()
     checkpoint_store = checkpoint_store or CheckpointStore(workspace)
     project_instructions = project_instructions or load_project_instructions(workspace)
-    system_prompt = project_instructions.system_prompt()
-    base_system_prompt = system_prompt or ""
+    instruction_tracker = InstructionTracker(workspace, project_instructions)
+    base_system_prompt = ""
     task_board = task_board if task_board is not None else TaskBoard()
     verification = verification if verification is not None else VerificationWorkflow()
     subagents = SubagentRunner(subagent_budget, subagent_depth)
@@ -220,6 +222,41 @@ def run_agent(
     request = request or create_message
     permission_gate = permission_gate or PermissionGate()
     messages = history if history is not None else []
+
+    def target_paths(call: ToolUseBlock) -> list[str]:
+        if not isinstance(call.input, dict):
+            return []
+        if call.name in {"read_file", "create_file", "replace_text", "search_text"}:
+            value = call.input.get("path", ".")
+            return [value] if isinstance(value, str) else []
+        if call.name == "apply_edits":
+            edits = call.input.get("edits", [])
+            if not isinstance(edits, list) or len(edits) > 20:
+                return []
+            return [
+                edit["path"]
+                for edit in edits
+                if isinstance(edit, dict) and isinstance(edit.get("path"), str)
+            ]
+        if call.name == "restore_edit_checkpoint":
+            checkpoint_id = call.input.get("checkpoint_id")
+            if not isinstance(checkpoint_id, str):
+                return []
+            return [
+                item.path
+                for item in checkpoint_store.list()
+                if item.id == checkpoint_id.strip().casefold()
+            ]
+        return []
+
+    def rules_required(rules: str) -> ToolResult:
+        return ToolResult(
+            "Project instructions for the target files are new or changed. "
+            "No file changes were made. Review these rules and retry the operation "
+            "in the next model request.\n\n" + rules,
+            True,
+        )
+
     user_message = {"role": "user", "content": prompt}
     messages.append(user_message)
     if on_history_event is not None:
@@ -227,7 +264,7 @@ def run_agent(
 
     for iteration in range(1, max_iterations + 1):
         verification.refresh(workspace)
-        system_prompt = base_system_prompt
+        system_prompt = instruction_tracker.begin_request() + base_system_prompt
         if task_board.tasks:
             system_prompt += "\nCurrent task state:\n" + task_board.render()
         if allow_host_commands and verification.state != "not_run":
@@ -407,6 +444,12 @@ def run_agent(
             elif call.name == "retest_checks" and not verification.checks:
                 return ToolResult("No prior checks are available to retest.", True)
             else:
+                try:
+                    rules = instruction_tracker.inspect(target_paths(call))
+                    if rules and call.name in EDIT_TOOLS:
+                        return rules_required(rules)
+                except (ContextError, OSError, ValueError) as exc:
+                    return ToolResult(str(exc), True)
                 permission_input = (
                     {"checks": verification.current_checks()}
                     if call.name == "retest_checks"
@@ -428,6 +471,12 @@ def run_agent(
 
         def execute_call(call: ToolUseBlock) -> ToolResult:
             def execute() -> ToolResult:
+                try:
+                    rules = instruction_tracker.inspect(target_paths(call))
+                    if rules and call.name in EDIT_TOOLS:
+                        return rules_required(rules)
+                except (ContextError, OSError, ValueError) as exc:
+                    return ToolResult(str(exc), True)
                 if call.name in {"list_tasks", "update_tasks"}:
                     return task_board.execute(call.name, call.input, on_history_event)
                 if call.name == "load_skill":
@@ -457,6 +506,10 @@ def run_agent(
                 )
                 if call.name in EDIT_TOOLS and not result.is_error:
                     verification.mark_edited()
+                if rules:
+                    result = ToolResult(
+                        rules + "\n\nTool result:\n" + result.content, result.is_error
+                    )
                 return result
 
             result = (
