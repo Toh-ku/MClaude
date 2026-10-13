@@ -6,6 +6,8 @@
 
 `fixtures/conversation.json` 是两种语言共用的中文、emoji、CRLF 和工具交换样例。它只包含虚构凭据。
 
+`fixtures/compacted-evidence.json` 固定压缩摘要中的证据条目，两种实现均验证中文、emoji、CRLF、调用来源和工作区版本在重复压缩后保留。证据编码在普通助手文本中的 `Tool evidence: ` JSON 行内，不增加 v1 日志事件类型；它们是有限的历史摘录，不是当前验证状态。
+
 工具定义可以从现有 Python API 导出，独立 TS 演进也可以直接维护协议文件：
 
 ```powershell

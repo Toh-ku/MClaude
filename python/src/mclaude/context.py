@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mclaude.evidence import EVIDENCE_PREFIX, collect_tool_evidence, render_evidence
+
 INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md")
 MAX_INSTRUCTION_FILE_CHARS = 100_000
 DEFAULT_CONTEXT_BUDGET_TOKENS = 100_000
@@ -193,6 +195,7 @@ def _clip(value: str, limit: int = 500) -> str:
 
 
 def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
+    evidence = collect_tool_evidence(messages)
     previous: list[str] = []
     user_requests: list[str] = []
     assistant_updates: list[str] = []
@@ -227,9 +230,9 @@ def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
     lines: list[str] = []
     used = 0
 
-    def add(label: str, value: str, cap: int) -> None:
+    def add(label: str, value: str, cap: int, ceiling: int = limit) -> None:
         nonlocal used
-        remaining = limit - used - len(label) - 2
+        remaining = ceiling - used - len(label) - 2
         if remaining <= 12 or not value.strip():
             return
         line = f"{label}: {_clip(value, min(cap, remaining))}"
@@ -240,6 +243,8 @@ def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
     prior_requests: list[str] = []
     earlier_context: list[str] = []
     for line in previous:
+        if line.startswith((EVIDENCE_PREFIX, "Evidence note: ")):
+            continue
         if line.startswith(("Earlier goal: ", "Original request: ")) and not goal:
             goal = line.split(": ", 1)[1]
         elif line.startswith("Recent user request: "):
@@ -250,12 +255,16 @@ def _summarize_messages(messages: list[dict[str, Any]], limit: int) -> str:
         goal = previous[0]
     if not goal and user_requests:
         goal = user_requests[0]
-    add("Earlier goal", goal, min(350, limit // 3))
+    requirements_limit = int(limit * 0.4) if evidence else limit
+    add("Earlier goal", goal, min(350, limit // 3), requirements_limit)
     recent_requests = [*reversed(prior_requests), *user_requests]
     for value in reversed(recent_requests[-5:]):
         if value == goal:
             continue
-        add("Recent user request", value, min(500, limit // 3))
+        add("Recent user request", value, min(500, limit // 3), requirements_limit)
+    for line in render_evidence(evidence, int(limit * 0.5)):
+        lines.append(line)
+        used += len(line) + 1
     for value in reversed(earlier_context):
         add("Earlier context", value, min(300, limit // 4))
     for value in reversed(assistant_updates[-4:]):
@@ -281,6 +290,10 @@ def compact_history(
             removed = [message for group in groups[:cut] for message in group]
             retained = [message for group in groups[cut:] for message in group]
             summary = _summarize_messages(removed, summary_limit)
+            if collect_tool_evidence(removed) and not any(
+                line.startswith(EVIDENCE_PREFIX) for line in summary.splitlines()
+            ):
+                continue
             candidate = [
                 {
                     "role": "user",

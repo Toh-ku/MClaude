@@ -1,0 +1,42 @@
+{
+  "history": [
+    {
+      "role": "user",
+      "content": "Use this compacted context for the earlier conversation."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Earlier conversation summary (generated locally):\nEarlier goal: 保留中文与关键证据\nTool evidence: {\"call_id\":\"read-1\",\"tool\":\"read_file\",\"outcome\":\"ok\",\"targets\":[\"example.txt\"],\"excerpt\":\"你好😀\\r\\n关键位置 example.txt:2\",\"truncated\":false}\nTool evidence: {\"call_id\":\"check-1\",\"tool\":\"run_checks\",\"outcome\":\"ok\",\"targets\":[],\"excerpt\":\"检查通过：12 tests passed\",\"truncated\":false,\"workspace_version\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}\nEvidence note: Historical excerpts; omitted evidence must be re-inspected."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "继续任务"
+    }
+  ],
+  "evidence": [
+    {
+      "call_id": "read-1",
+      "tool": "read_file",
+      "outcome": "ok",
+      "targets": [
+        "example.txt"
+      ],
+      "excerpt": "你好😀\r\n关键位置 example.txt:2",
+      "truncated": false
+    },
+    {
+      "call_id": "check-1",
+      "tool": "run_checks",
+      "outcome": "ok",
+      "targets": [],
+      "excerpt": "检查通过：12 tests passed",
+      "truncated": false,
+      "workspace_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

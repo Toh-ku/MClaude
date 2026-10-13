@@ -1,9 +1,15 @@
 import {
   ContextBudgetExceeded,
   clip,
+  codePoints,
   type Message,
   type ToolSpec,
 } from "./types.js";
+import {
+  EVIDENCE_PREFIX,
+  collectToolEvidence,
+  renderEvidence,
+} from "./evidence.js";
 const SUMMARY_PREFIX = "Earlier conversation summary (generated locally):";
 const TRUNCATION_MARKER = "\n...[tool result truncated to fit context budget]";
 export function estimateTokens(value: unknown): number {
@@ -105,6 +111,7 @@ function groups(messages: Message[]): Message[][] {
   return output;
 }
 function summarize(messages: Message[], limit: number): string {
+  const evidence = collectToolEvidence(messages);
   const previous: string[] = [],
     users: string[] = [],
     updates: string[] = [],
@@ -132,6 +139,8 @@ function summarize(messages: Message[], limit: number): string {
   const prior: string[] = [],
     earlier: string[] = [];
   for (const line of previous) {
+    if (line.startsWith(EVIDENCE_PREFIX) || line.startsWith("Evidence note: "))
+      continue;
     if (/^(Earlier goal|Original request): /.test(line) && !goal)
       goal = line.slice(line.indexOf(": ") + 2);
     else if (line.startsWith("Recent user request: "))
@@ -141,8 +150,13 @@ function summarize(messages: Message[], limit: number): string {
   goal ||= previous[0] || users[0] || "";
   const lines: string[] = [];
   let used = 0;
-  const add = (label: string, text: string, cap: number): void => {
-    const remaining = limit - used - label.length - 2;
+  const add = (
+    label: string,
+    text: string,
+    cap: number,
+    ceiling = limit,
+  ): void => {
+    const remaining = ceiling - used - label.length - 2;
     if (remaining <= 12 || !text.trim()) return;
     let value = text.replace(/\s+/g, " ").trim();
     const max = Math.min(cap, remaining);
@@ -151,10 +165,26 @@ function summarize(messages: Message[], limit: number): string {
     lines.push(line);
     used += Array.from(line).length + 1;
   };
-  add("Earlier goal", goal, Math.min(350, Math.floor(limit / 3)));
+  const requirementsLimit = evidence.length ? Math.floor(limit * 0.4) : limit;
+  add(
+    "Earlier goal",
+    goal,
+    Math.min(350, Math.floor(limit / 3)),
+    requirementsLimit,
+  );
   for (const u of [...prior.reverse(), ...users].slice(-5).reverse())
     if (u !== goal)
-      add("Recent user request", u, Math.min(500, Math.floor(limit / 3)));
+      add(
+        "Recent user request",
+        u,
+        Math.min(500, Math.floor(limit / 3)),
+        requirementsLimit,
+      );
+  const evidenceLines = renderEvidence(evidence, Math.floor(limit * 0.5));
+  for (const line of evidenceLines) {
+    lines.push(line);
+    used += codePoints(line) + 1;
+  }
   for (const u of earlier.reverse())
     add("Earlier context", u, Math.min(300, Math.floor(limit / 4)));
   for (const u of updates.slice(-4).reverse())
@@ -173,6 +203,14 @@ export function compactHistory(
   if (grouped.length < 2) return;
   for (const limit of [4000, 2000, 1000, 500, 200])
     for (let cut = 1; cut < grouped.length; cut++) {
+      const removed = grouped.slice(0, cut).flat();
+      const summary = summarize(removed, limit);
+      // Refuse to erase all tool evidence just to fit a smaller summary.
+      if (
+        collectToolEvidence(removed).length &&
+        !summary.split("\n").some((line) => line.startsWith(EVIDENCE_PREFIX))
+      )
+        continue;
       const candidate: Message[] = [
         {
           role: "user",
@@ -183,10 +221,7 @@ export function compactHistory(
           content: [
             {
               type: "text",
-              text:
-                SUMMARY_PREFIX +
-                "\n" +
-                summarize(grouped.slice(0, cut).flat(), limit),
+              text: SUMMARY_PREFIX + "\n" + summary,
             },
           ],
         },
